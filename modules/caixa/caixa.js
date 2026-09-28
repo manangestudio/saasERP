@@ -63,14 +63,14 @@ export async function initCaixaModule(container) {
                   Operador: ${activeSession.cashierName}
                 </h3>
                 <div style="font-size: 11px; color: #94a3b8;">
-                  Abertura: ${new Date(activeSession.openedAt).toLocaleString('pt-MZ')} • Fundo Inicial de Troco: <strong style="color: #cbd5e1;">${(activeSession.openingBalance || 0).toFixed(2)} MT</strong>
+                  Abertura: ${new Date(activeSession.openedAt).toLocaleString('pt-MZ')} • Fundo Inicial de Troco: <strong style="color: #cbd5e1;">${Number(activeSession.openingBalance ?? 0).toFixed(2)} MT</strong>
                 </div>
               </div>
 
               <div style="text-align: right;">
                 <div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Dinheiro Físico em Gaveta:</div>
                 <div style="font-size: 26px; font-weight: 900; font-family: var(--font-mono); color: #34d399;">
-                  ${(activeSession.cashInDrawer || 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 16px;">MT</span>
+                  ${Number(activeSession.cashInDrawer ?? 0).toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 16px;">MT</span>
                 </div>
                 <div style="font-size: 10px; color: #64748b; margin-top: 2px;">
                   Total acumulado de vendas em numerário + suprimentos - sangrias
@@ -82,23 +82,27 @@ export async function initCaixaModule(container) {
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 16px; padding-top: 16px; border-top: 1px solid #1f2937;">
               <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px;">
                 <div style="font-size: 10px; color: #94a3b8;">Fundo de Troco</div>
-                <div style="font-weight: 800; color: #cbd5e1; font-family: var(--font-mono);">${(activeSession.openingBalance || 0).toFixed(2)} MT</div>
+                <div style="font-weight: 800; color: #cbd5e1; font-family: var(--font-mono);">${Number(activeSession.openingBalance ?? 0).toFixed(2)} MT</div>
               </div>
               <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px;">
                 <div style="font-size: 10px; color: #94a3b8;">Vendas em Dinheiro</div>
-                <div style="font-weight: 800; color: #34d399; font-family: var(--font-mono);">${(activeSession.cashSales || 0).toFixed(2)} MT</div>
+                <div style="font-weight: 800; color: #34d399; font-family: var(--font-mono);">${Number(activeSession.cashSales ?? 0).toFixed(2)} MT</div>
               </div>
               <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px;">
                 <div style="font-size: 10px; color: #94a3b8;">Vendas M-Pesa / Cartão</div>
-                <div style="font-weight: 800; color: #60a5fa; font-family: var(--font-mono);">${((activeSession.mpesaSales || 0) + (activeSession.emolaSales || 0) + (activeSession.posSales || 0)).toFixed(2)} MT</div>
+                <div style="font-weight: 800; color: #60a5fa; font-family: var(--font-mono);">${(
+                  Number(activeSession.mpesaSales ?? 0) +
+                  Number(activeSession.emolaSales ?? 0) +
+                  Number(activeSession.posSales ?? 0)
+                ).toFixed(2)} MT</div>
               </div>
               <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px;">
                 <div style="font-size: 10px; color: #94a3b8;">Suprimentos (+Troco)</div>
-                <div style="font-weight: 800; color: #38bdf8; font-family: var(--font-mono);">+${(activeSession.totalSupplies || 0).toFixed(2)} MT</div>
+                <div style="font-weight: 800; color: #38bdf8; font-family: var(--font-mono);">+${Number(activeSession.totalSupplies ?? 0).toFixed(2)} MT</div>
               </div>
               <div style="background: #0f172a; padding: 8px 12px; border-radius: 8px;">
                 <div style="font-size: 10px; color: #94a3b8;">Sangrias (-Cofre)</div>
-                <div style="font-weight: 800; color: #fbbf24; font-family: var(--font-mono);">${(activeSession.totalBleeds || 0).toFixed(2)} MT</div>
+                <div style="font-weight: 800; color: #fbbf24; font-family: var(--font-mono);">${Number(activeSession.totalBleeds ?? 0).toFixed(2)} MT</div>
               </div>
             </div>
           </div>
@@ -137,11 +141,25 @@ export async function initCaixaModule(container) {
                 </tr>
               </thead>
               <tbody>
-                ${sessions.length === 0 ? `
+                ${Array.isArray(sessions) && sessions.length === 0 ? `
                   <tr><td colspan="8" style="text-align: center; color: #64748b; padding: 24px;">Nenhuma sessão de caixa encerrada ainda.</td></tr>
-                ` : sessions.map(s => {
+                ` : Array.isArray(sessions) ? sessions.map(s => {
                   const isOpen = s.status === 'OPEN';
-                  const diff = s.difference || 0;
+
+                  const diff = Number(s.difference ?? 0);
+
+                  const closingCountedBalance =
+                    s.closingCountedBalance !== null &&
+                    s.closingCountedBalance !== undefined
+                      ? Number(s.closingCountedBalance)
+                      : null;
+
+                  const expectedBalance = Number(
+                    s.closingExpectedBalance ??
+                    s.cashInDrawer ??
+                    0
+                  );
+
                   return `
                     <tr>
                       <td>
@@ -157,13 +175,13 @@ export async function initCaixaModule(container) {
                         ${s.closedAt ? new Date(s.closedAt).toLocaleString('pt-MZ') : '-'}
                       </td>
                       <td style="font-family: var(--font-mono); font-weight: 700; color: #cbd5e1;">
-                        ${(s.closingExpectedBalance ?? s.cashInDrawer ?? 0).toFixed(2)} MT
+                        ${expectedBalance.toFixed(2)} MT
                       </td>
                       <td style="font-family: var(--font-mono); font-weight: 800; color: #34d399;">
-                        ${s.closingCountedBalance !== undefined ? `${s.closingCountedBalance.toFixed(2)} MT` : '-'}
+                        ${closingCountedBalance !== null ? `${closingCountedBalance.toFixed(2)} MT` : '-'}
                       </td>
                       <td>
-                        ${s.closingCountedBalance !== undefined ? `
+                        ${closingCountedBalance !== null ? `
                           <strong style="font-family: var(--font-mono); color: ${diff === 0 ? '#34d399' : diff > 0 ? '#60a5fa' : '#ef4444'};">
                             ${diff > 0 ? `+${diff.toFixed(2)} (Sobra)` : diff < 0 ? `${diff.toFixed(2)} (Quebra)` : '0.00 (Exato)'}
                           </strong>
@@ -176,7 +194,9 @@ export async function initCaixaModule(container) {
                       </td>
                     </tr>
                   `;
-                }).join('')}
+                }).join('') : `
+                  <tr><td colspan="8" style="text-align: center; color: #64748b; padding: 24px;">Nenhuma sessão de caixa encerrada ainda.</td></tr>
+                `}
               </tbody>
             </table>
           </div>
@@ -244,11 +264,14 @@ export async function initCaixaModule(container) {
 
       const btn = ev.currentTarget;
       if (btn.disabled) return;
+
       if (!name) {
         showToast('Informe o nome do operador do turno.', 'error');
         return;
       }
+
       btn.disabled = true;
+
       try {
         await db.openCashSession(storeId, initialCash, name);
       } catch (err) {
@@ -256,8 +279,10 @@ export async function initCaixaModule(container) {
         showToast(err.message || 'Não foi possível abrir o caixa. Nenhuma alteração foi registrada.', 'error');
         return;
       }
+
       showToast('Turno de caixa aberto com sucesso!', 'success');
       modal.remove();
+
       if (onSuccess) onSuccess();
     };
 
@@ -268,6 +293,8 @@ export async function initCaixaModule(container) {
     const modal = document.createElement('div');
     modal.className = 'modal-backdrop';
 
+    const cashInDrawer = Number(session?.cashInDrawer ?? 0);
+
     modal.innerHTML = `
       <div class="modal-dialog" style="max-width: 400px;">
         <div class="modal-header" style="border-bottom-color: rgba(245, 158, 11, 0.4);">
@@ -276,11 +303,11 @@ export async function initCaixaModule(container) {
         </div>
         <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
           <div style="font-size: 11px; color: #94a3b8;">
-            Valor disponível em gaveta: <strong style="color: #34d399;">${session.cashInDrawer.toFixed(2)} MT</strong>
+            Valor disponível em gaveta: <strong style="color: #34d399;">${cashInDrawer.toFixed(2)} MT</strong>
           </div>
           <div>
             <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Valor a Retirar (MT):</label>
-            <input type="number" min="1" max="${session.cashInDrawer}" step="any" id="inp-sg-val" placeholder="0.00" style="width: 100%; font-size: 16px; font-weight: bold; font-family: var(--font-mono);">
+            <input type="number" min="1" max="${cashInDrawer}" step="any" id="inp-sg-val" placeholder="0.00" style="width: 100%; font-size: 16px; font-weight: bold; font-family: var(--font-mono);">
           </div>
           <div>
             <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Motivo / Destino:</label>
@@ -296,14 +323,16 @@ export async function initCaixaModule(container) {
 
     modal.querySelector('#btn-close-sgmodal').onclick = () => modal.remove();
     modal.querySelector('#btn-cancel-sgmodal').onclick = () => modal.remove();
+
     modal.querySelector('#btn-confirm-sangria').onclick = async (ev) => {
       const val = parseFloat(modal.querySelector('#inp-sg-val').value) || 0;
       const reason = modal.querySelector('#inp-sg-reason').value.trim();
 
-      if (val <= 0 || val > session.cashInDrawer) {
+      if (val <= 0 || val > cashInDrawer) {
         showToast('Valor inválido ou maior que o saldo em gaveta.', 'error');
         return;
       }
+
       if (!reason) {
         showToast('Informe o motivo da sangria.', 'error');
         return;
@@ -311,7 +340,9 @@ export async function initCaixaModule(container) {
 
       const btn = ev.currentTarget;
       if (btn.disabled) return;
+
       btn.disabled = true;
+
       try {
         await db.registerSangria(session.id, val, reason);
       } catch (err) {
@@ -319,8 +350,10 @@ export async function initCaixaModule(container) {
         showToast(err.message || 'Não foi possível registrar a sangria. Nenhuma alteração foi registrada.', 'error');
         return;
       }
+
       showToast(`Sangria de ${val.toFixed(2)} MT efetuada com sucesso!`, 'success');
       modal.remove();
+
       if (onSuccess) onSuccess();
     };
 
@@ -356,6 +389,7 @@ export async function initCaixaModule(container) {
 
     modal.querySelector('#btn-close-spmodal').onclick = () => modal.remove();
     modal.querySelector('#btn-cancel-spmodal').onclick = () => modal.remove();
+
     modal.querySelector('#btn-confirm-suprimento').onclick = async (ev) => {
       const val = parseFloat(modal.querySelector('#inp-sp-val').value) || 0;
       const reason = modal.querySelector('#inp-sp-reason').value.trim();
@@ -369,9 +403,12 @@ export async function initCaixaModule(container) {
         showToast('Informe a origem/motivo do suprimento.', 'error');
         return;
       }
+
       const btn = ev.currentTarget;
       if (btn.disabled) return;
+
       btn.disabled = true;
+
       try {
         await db.registerSuprimento(session.id, val, reason);
       } catch (err) {
@@ -379,8 +416,10 @@ export async function initCaixaModule(container) {
         showToast(err.message || 'Não foi possível registrar o suprimento. Nenhuma alteração foi registrada.', 'error');
         return;
       }
+
       showToast(`Suprimento de ${val.toFixed(2)} MT adicionado ao caixa!`, 'success');
       modal.remove();
+
       if (onSuccess) onSuccess();
     };
 
