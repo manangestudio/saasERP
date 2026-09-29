@@ -1204,378 +1204,471 @@ class GefDatabase {
   }
 
   // ============================================================
-  // --- AMBASSADORS & PARTNERS ---
-  // ============================================================
-  //
-  // REGRA DE SEGURANÇA:
-  //
-  // SUPERADMIN:
-  //   Pode consultar todos os embaixadores.
-  //
-  // EMBAIXADOR:
-  //   Só pode consultar o registro cujo user_id corresponde
-  //   ao utilizador autenticado no Supabase Auth.
-  //
-  // A proteção definitiva deverá também existir no Supabase/RLS.
-  // Este filtro no cliente NÃO substitui RLS.
-  //
-  // ============================================================
+// ============================================================
+// --- AMBASSADORS & PARTNERS ---
+// ============================================================
 
-  async getAmbassadors() {
-    const client = requireClient();
+_normalizeAmbassadorStatus(status, active = true) {
+    const value = String(status || '').toUpperCase().trim();
 
-    // Descobre o utilizador atualmente autenticado no Supabase.
-    const {
-      data: { user },
-      error: userError
-    } = await client.auth.getUser();
+    if (value === 'ATIVO') return 'ATIVO';
+    if (value === 'BLOQUEADO') return 'BLOQUEADO';
+    if (value === 'DESATIVADO') return 'DESATIVADO';
 
-    if (userError) {
-      throw new Error(
-        userError.message ||
-        'Não foi possível identificar o utilizador autenticado.'
-      );
-    }
+    // Compatibilidade com dados antigos
+    if (value === 'INATIVO') return 'DESATIVADO';
+
+    return active === false ? 'DESATIVADO' : 'ATIVO';
+},
+
+async getAmbassadors() {
+    const client = this.requireClient();
+
+    const { data: { user } = {} } = await client.auth.getUser();
 
     if (!user) {
-      throw new Error(
-        'Utilizador não autenticado.'
-      );
+        throw new Error('Utilizador não autenticado.');
     }
 
-    // Descobre o papel real através do perfil.
-    const profile = unwrap(
-      await client
+    // Descobrir o perfil atual
+    const { data: profile, error: profileError } = await client
         .from('profiles')
         .select('role')
         .eq('id', user.id)
-        .maybeSingle(),
-      null
-    );
+        .maybeSingle();
 
-    const role = String(
-      profile?.role ||
-      user.app_metadata?.role ||
-      user.user_metadata?.role ||
-      ''
-    ).toUpperCase();
+    if (profileError) {
+        throw profileError;
+    }
+
+    const role = normalizeRole(profile?.role);
 
     let query = client
-      .from('ambassadors')
-      .select('*, ambassador_referred_stores(*), ambassador_payouts(*)');
-
-    // SUPERADMIN vê todos.
-    if (role !== 'SUPERADMIN') {
-      // Qualquer outro utilizador só pode receber o seu próprio embaixador.
-      query = query.eq('user_id', user.id);
-    }
-
-    const rows = unwrap(
-      await query,
-      []
-    );
-
-    return rows.map(a => ({
-      id: a.id,
-
-      // Ligação entre o embaixador e a conta Supabase Auth.
-      userId: a.user_id || null,
-
-      name: a.name,
-      phone: a.phone,
-      pixMpesa: a.pix_mpesa,
-      paymentDetails: a.pix_mpesa,
-
-      code: a.referral_code,
-
-      commissionRate:
-        Number(a.commission_rate || 0),
-
-      pendingCommissions:
-        Number(a.pending_commissions || 0),
-
-      paidCommissions:
-        Number(a.total_earned || 0),
-
-      status:
-        a.active ? 'ATIVO' : 'INATIVO',
-
-      registeredStores:
-        (a.ambassador_referred_stores || []).map(s => ({
-          id: s.id,
-          ambassadorId: s.ambassador_id,
-          name: s.name,
-          ownerName: s.owner_name,
-          phone: s.phone,
-          city: s.city,
-
-          monthlyFee:
-            Number(s.monthly_fee || 0),
-
-          paymentStatus:
-            s.payment_status,
-
-          commissionRate:
-            Number(s.commission_rate || 0),
-
-          contractDurationMonths:
-            Number(s.contract_duration_months || 0),
-
-          totalCommissionEarned:
-            Number(s.total_commission_earned || 0),
-
-          registeredAt:
-            s.created_at || null,
-
-          lastPaymentDate:
-            s.last_payment_date || null,
-
-          nextDueDate:
-            s.next_due_date || null,
-
-          monthsActive:
-            Number(s.months_active || 0),
-
-          commissionDurationText:
-            s.commission_duration_text || null
-        })),
-
-      payoutHistory:
-        (a.ambassador_payouts || []).map(p => ({
-          id: p.id,
-          ambassadorId: p.ambassador_id,
-          date: p.created_at,
-          amount: Number(p.amount || 0),
-          method: p.method,
-          receipt: p.receipt,
-          status: p.status
-        })),
-
-      totalStores:
-        (a.ambassador_referred_stores || []).length,
-
-      activeStores:
-        (a.ambassador_referred_stores || [])
-          .filter(s => s.payment_status === 'PAGO')
-          .length
-    }));
-  }
-
-  async saveAmbassador(ambassador) {
-    const client = requireClient();
-
-    if (!ambassador.phone) {
-      throw new Error(
-        'Telefone do embaixador é obrigatório.'
-      );
-    }
-
-    const pixMpesa =
-      ambassador.pixMpesa ||
-      ambassador.paymentDetails ||
-      ambassador.phone;
-
-    /*
-     * Se userId foi informado explicitamente,
-     * grava a ligação com auth.users.
-     *
-     * Para o cadastro inicial feito pelo Super Admin,
-     * user_id pode continuar NULL até associarmos
-     * a conta Supabase Auth do embaixador.
-     */
-    const row = {
-      id: ambassador.id,
-      user_id: ambassador.userId || null,
-      name: ambassador.name,
-      phone: ambassador.phone,
-      pix_mpesa: pixMpesa,
-      referral_code: ambassador.code,
-      commission_rate: ambassador.commissionRate ?? 15,
-      active: ambassador.status !== 'INATIVO'
-    };
-
-    unwrap(
-      await client
         .from('ambassadors')
-        .upsert(row),
-      null
-    );
+        .select(`
+            *,
+            ambassador_referred_stores(*),
+            ambassador_payouts(*)
+        `)
+        .order('created_at', { ascending: false });
 
-    return ambassador;
-  }
-
-  async addAmbassadorReferredStore(
-    ambassadorId,
-    storeData
-  ) {
-    const client = requireClient();
-
-    const commissionRate =
-      Number(storeData.commissionRate) || 15;
-
-    const monthlyFee =
-      Number(storeData.monthlyFee) || 0;
-
-    const commissionEarned =
-      storeData.paymentStatus === 'PAGO'
-        ? Number(
-            (
-              monthlyFee *
-              commissionRate /
-              100
-            ).toFixed(2)
-          )
-        : 0;
-
-    const row = {
-      id:
-        'store-ref-' +
-        Date.now(),
-
-      ambassador_id:
-        ambassadorId,
-
-      name:
-        storeData.name,
-
-      owner_name:
-        storeData.ownerName,
-
-      phone:
-        storeData.phone,
-
-      city:
-        storeData.city,
-
-      monthly_fee:
-        monthlyFee,
-
-      payment_status:
-        storeData.paymentStatus ||
-        'PENDENTE',
-
-      commission_rate:
-        commissionRate,
-
-      contract_duration_months:
-        Number(
-          storeData.contractDurationMonths
-        ) || 12,
-
-      total_commission_earned:
-        commissionEarned
-    };
-
-    unwrap(
-      await client
-        .from('ambassador_referred_stores')
-        .insert(row),
-      null
-    );
-
-    if (commissionEarned > 0) {
-      const amb = unwrap(
-        await client
-          .from('ambassadors')
-          .select('pending_commissions')
-          .eq('id', ambassadorId)
-          .maybeSingle(),
-        null
-      );
-
-      if (amb) {
-        unwrap(
-          await client
-            .from('ambassadors')
-            .update({
-              pending_commissions:
-                Number(
-                  amb.pending_commissions || 0
-                ) +
-                commissionEarned
-            })
-            .eq('id', ambassadorId),
-          null
-        );
-      }
+    // Superadmin vê todos.
+    // Embaixador vê somente o próprio registo.
+    if (role !== 'SUPERADMIN') {
+        query = query.eq('user_id', user.id);
     }
 
-    return row;
-  }
+    const { data, error } = await query;
 
-  async payAmbassadorCommission(
+    if (error) {
+        throw error;
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+
+    return rows.map((a) => {
+        const status = this._normalizeAmbassadorStatus(
+            a.status,
+            a.active
+        );
+
+        const referredStores = Array.isArray(a.ambassador_referred_stores)
+            ? a.ambassador_referred_stores
+            : [];
+
+        const payouts = Array.isArray(a.ambassador_payouts)
+            ? a.ambassador_payouts
+            : [];
+
+        const paidCommissions = payouts.reduce(
+            (sum, payout) => sum + Number(payout.amount || 0),
+            0
+        );
+
+        return {
+            id: a.id,
+            userId: a.user_id,
+
+            name: a.name || '',
+            phone: a.phone || '',
+            pixMpesa: a.pix_mpesa || '',
+            paymentDetails: a.pix_mpesa || '',
+
+            code: a.referral_code || '',
+
+            commissionRate: Number(a.commission_rate || 0),
+
+            totalEarned: Number(a.total_earned || 0),
+            pendingCommissions: Number(a.pending_commissions || 0),
+            paidCommissions,
+
+            status,
+
+            // Compatibilidade com código antigo
+            active: status !== 'DESATIVADO',
+
+            createdAt: a.created_at,
+
+            referredStores: referredStores.map((store) => ({
+                id: store.id,
+                ambassadorId: store.ambassador_id,
+
+                name: store.name || '',
+                ownerName: store.owner_name || '',
+                phone: store.phone || '',
+                city: store.city || '',
+
+                monthlyFee: Number(store.monthly_fee || 0),
+
+                paymentStatus: store.payment_status || 'PENDENTE',
+                lastPaymentDate: store.last_payment_date || null,
+                nextDueDate: store.next_due_date || null,
+
+                commissionRate: Number(
+                    store.commission_rate ?? a.commission_rate ?? 0
+                ),
+
+                contractDurationMonths: Number(
+                    store.contract_duration_months || 0
+                ),
+
+                monthsActive: Number(
+                    store.months_active || 0
+                ),
+
+                totalCommissionEarned: Number(
+                    store.total_commission_earned || 0
+                ),
+
+                createdAt: store.created_at
+            })),
+
+            payoutHistory: payouts.map((payout) => ({
+                id: payout.id,
+                ambassadorId: payout.ambassador_id,
+                amount: Number(payout.amount || 0),
+                method: payout.method || '',
+                receipt: payout.receipt || '',
+                status: payout.status || '',
+                createdAt: payout.created_at
+            })),
+
+            totalStores: referredStores.length,
+
+            activeStores: referredStores.filter(
+                store =>
+                    String(store.payment_status || '').toUpperCase() === 'PAGO'
+            ).length
+        };
+    });
+},
+
+// ------------------------------------------------------------
+// Criar / atualizar dados básicos do embaixador
+// ------------------------------------------------------------
+
+async saveAmbassador(ambassador) {
+    const client = this.requireClient();
+
+    if (!ambassador?.id) {
+        throw new Error('ID do embaixador é obrigatório.');
+    }
+
+    const name = String(ambassador.name || '').trim();
+    const phone = String(ambassador.phone || '').trim();
+    const pixMpesa = String(
+        ambassador.pixMpesa ??
+        ambassador.paymentDetails ??
+        ''
+    ).trim();
+
+    const commissionRate = Number(
+        ambassador.commissionRate ?? 0
+    );
+
+    if (!name) {
+        throw new Error('Nome do embaixador é obrigatório.');
+    }
+
+    if (!phone) {
+        throw new Error('Telefone do embaixador é obrigatório.');
+    }
+
+    if (!Number.isFinite(commissionRate) || commissionRate < 0) {
+        throw new Error('Taxa de comissão inválida.');
+    }
+
+    const { data, error } = await client.rpc(
+        'fn_admin_update_ambassador',
+        {
+            p_ambassador_id: ambassador.id,
+            p_name: name,
+            p_phone: phone,
+            p_pix_mpesa: pixMpesa,
+            p_commission_rate: commissionRate
+        }
+    );
+
+    if (error) {
+        throw error;
+    }
+
+    return this.unwrap(data);
+},
+
+// ------------------------------------------------------------
+// Alterar estado do embaixador
+// ATIVO | BLOQUEADO | DESATIVADO
+// ------------------------------------------------------------
+
+async setAmbassadorStatus(ambassadorId, status) {
+    const client = this.requireClient();
+
+    if (!ambassadorId) {
+        throw new Error('ID do embaixador é obrigatório.');
+    }
+
+    const normalizedStatus = this._normalizeAmbassadorStatus(status);
+
+    const { data, error } = await client.rpc(
+        'fn_admin_set_ambassador_status',
+        {
+            p_ambassador_id: ambassadorId,
+            p_status: normalizedStatus
+        }
+    );
+
+    if (error) {
+        throw error;
+    }
+
+    return this.unwrap(data);
+},
+
+// Ativar
+async activateAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(
+        ambassadorId,
+        'ATIVO'
+    );
+},
+
+// Bloquear
+async blockAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(
+        ambassadorId,
+        'BLOQUEADO'
+    );
+},
+
+// Desativar
+async deactivateAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(
+        ambassadorId,
+        'DESATIVADO'
+    );
+},
+
+// ------------------------------------------------------------
+// Aprovar loja indicada
+// ------------------------------------------------------------
+
+async approveAmbassadorStore(referredStoreId) {
+    const client = this.requireClient();
+
+    if (!referredStoreId) {
+        throw new Error('ID da loja indicada é obrigatório.');
+    }
+
+    const { data, error } = await client.rpc(
+        'fn_approve_ambassador_store',
+        {
+            p_referred_store_id: referredStoreId
+        }
+    );
+
+    if (error) {
+        throw error;
+    }
+
+    return this.unwrap(data);
+},
+
+// ------------------------------------------------------------
+// Rejeitar loja indicada
+// ------------------------------------------------------------
+
+async rejectAmbassadorStore(referredStoreId, reason = null) {
+    const client = this.requireClient();
+
+    if (!referredStoreId) {
+        throw new Error('ID da loja indicada é obrigatório.');
+    }
+
+    const { data, error } = await client.rpc(
+        'fn_reject_ambassador_store',
+        {
+            p_referred_store_id: referredStoreId,
+            p_reason: reason || null
+        }
+    );
+
+    if (error) {
+        throw error;
+    }
+
+    return this.unwrap(data);
+},
+
+// ------------------------------------------------------------
+// Pagar / liquidar comissão
+// ------------------------------------------------------------
+
+async payAmbassadorCommission(
     ambassadorId,
     amount,
     method,
-    ref
-  ) {
-    const client = requireClient();
+    ref = ''
+) {
+    const client = this.requireClient();
 
-    const amb = unwrap(
-      await client
-        .from('ambassadors')
-        .select('*')
-        .eq('id', ambassadorId)
-        .maybeSingle(),
-      null
-    );
-
-    if (!amb) {
-      throw new Error(
-        'Embaixador não encontrado.'
-      );
+    if (!ambassadorId) {
+        throw new Error('ID do embaixador é obrigatório.');
     }
 
-    const paidAmount =
-      amount && amount > 0
-        ? amount
-        : Number(
-            amb.pending_commissions || 0
-          );
+    const paidAmount = Number(amount);
 
-    unwrap(
-      await client
-        .from('ambassadors')
-        .update({
-          pending_commissions: 0,
-          total_earned:
-            Number(
-              amb.total_earned || 0
-            ) +
-            paidAmount
-        })
-        .eq('id', ambassadorId),
-      null
+    if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+        throw new Error('Valor da comissão inválido.');
+    }
+
+    const paymentMethod = String(method || '').trim();
+
+    if (!paymentMethod) {
+        throw new Error('Método de pagamento é obrigatório.');
+    }
+
+    const receipt = String(ref || '').trim();
+
+    const { data, error } = await client.rpc(
+        'fn_admin_pay_ambassador_commission',
+        {
+            p_ambassador_id: ambassadorId,
+            p_amount: paidAmount,
+            p_method: paymentMethod,
+            p_receipt: receipt
+        }
     );
 
-    unwrap(
-      await client
-        .from('ambassador_payouts')
-        .insert({
-          id:
-            'LIQ-' +
-            Date.now(),
+    if (error) {
+        throw error;
+    }
 
-          ambassador_id:
-            ambassadorId,
+    return this.unwrap(data);
+},
 
-          amount:
-            paidAmount,
+// ------------------------------------------------------------
+// Adicionar loja indicada
+// ------------------------------------------------------------
 
-          method:
-            method || 'M-Pesa',
+async addAmbassadorReferredStore(
+    ambassadorId,
+    storeData
+) {
+    const client = this.requireClient();
 
-          receipt:
-            ref || null,
+    if (!ambassadorId) {
+        throw new Error('ID do embaixador é obrigatório.');
+    }
 
-          status:
-            'LIQUIDADO'
-        }),
-      null
+    if (!storeData?.name) {
+        throw new Error('Nome da loja é obrigatório.');
+    }
+
+    const monthlyFee = Number(
+        storeData.monthlyFee ?? 0
     );
 
-    return true;
-  }
+    const commissionRate = Number(
+        storeData.commissionRate ?? 15
+    );
+
+    const paymentStatus =
+        storeData.paymentStatus || 'PENDENTE';
+
+    const commission =
+        paymentStatus === 'PAGO'
+            ? monthlyFee * commissionRate / 100
+            : 0;
+
+    const row = {
+        id: storeData.id || crypto.randomUUID(),
+
+        ambassador_id: ambassadorId,
+
+        name: String(storeData.name).trim(),
+
+        owner_name:
+            String(storeData.ownerName || '').trim() || null,
+
+        phone:
+            String(storeData.phone || '').trim() || null,
+
+        city:
+            String(storeData.city || '').trim() || null,
+
+        monthly_fee: monthlyFee,
+
+        payment_status: paymentStatus,
+
+        last_payment_date:
+            storeData.lastPaymentDate || null,
+
+        next_due_date:
+            storeData.nextDueDate || null,
+
+        commission_rate: commissionRate,
+
+        contract_duration_months:
+            Number(storeData.contractDurationMonths || 12),
+
+        months_active:
+            Number(storeData.monthsActive || 0),
+
+        total_commission_earned:
+            Number(storeData.totalCommissionEarned || commission)
+    };
+
+    const { data, error } = await client
+        .from('ambassador_referred_stores')
+        .insert(row)
+        .select()
+        .single();
+
+    if (error) {
+        throw error;
+    }
+
+    return data;
+},
+
+// ------------------------------------------------------------
+// Compatibilidade: método antigo para pagamento
+// ------------------------------------------------------------
+
+async settleAmbassadorCommission(
+    ambassadorId,
+    amount,
+    method,
+    ref = ''
+) {
+    return this.payAmbassadorCommission(
+        ambassadorId,
+        amount,
+        method,
+        ref
+    );
+},
 
   // --- SAAS & LOCK ENGINE ---
   // Sem código mestre de desbloqueio no cliente: renovação só via RPC restrita a SUPERADMIN (RLS no banco).
