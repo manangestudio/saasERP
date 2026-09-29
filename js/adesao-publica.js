@@ -121,7 +121,6 @@ function renderFinancialPanel() {
     const ambassador =
         ambassadorData?.ambassador || {};
 
-
     const total =
         document.getElementById(
             'ambassador-total-earned'
@@ -400,6 +399,8 @@ function renderStores() {
 
 /* =========================================================
    CONFIGURAR BOTÃO DE ADESÃO
+   IMPORTANTE:
+   O código do embaixador é preservado na URL.
 ========================================================= */
 
 function configureCTA() {
@@ -409,13 +410,8 @@ function configureCTA() {
             'register-store-btn'
         );
 
-    const formSection =
-        document.getElementById(
-            'form-section'
-        );
 
-
-    if (!button || !formSection) {
+    if (!button) {
 
         return;
     }
@@ -472,19 +468,34 @@ function configureCTA() {
     }
 
 
+    /* =====================================================
+       ABRIR PÁGINA DE ADESÃO PRESERVANDO O EMBAIXADOR
+    ===================================================== */
+
     button.addEventListener(
         'click',
         () => {
 
-            formSection.style.display =
-                'block';
+            if (!ambassadorCode) {
+
+                showPublicError(
+                    'Código do embaixador não encontrado.'
+                );
+
+                return;
+            }
 
 
-            formSection.scrollIntoView({
-                behavior: 'smooth',
-                block: 'start'
-            });
+            const url =
+                `adesao.html?embaixador=${
+                    encodeURIComponent(
+                        ambassadorCode
+                    )
+                }`;
 
+
+            window.location.href =
+                url;
         }
     );
 }
