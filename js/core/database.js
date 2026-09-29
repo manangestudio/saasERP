@@ -353,6 +353,7 @@ class GefDatabase {
       scale_protocol: store.scaleProtocol,
       receipt_footer: store.receiptFooter
     };
+
     // Campos de assinatura: só são enviados se o chamador explicitamente os informou
     // (ex: painel SUPERADMIN). Uma trigger no banco garante que só SUPERADMIN pode
     // efetivamente alterá-los, mesmo que outro papel tente enviar estes campos.
@@ -421,11 +422,24 @@ class GefDatabase {
     if (rows.length === 0) return [];
 
     const ids = rows.map(r => r.id);
+
     const batchRows = unwrap(
-      await client.from('batches').select('*').in('product_id', ids).eq('status', 'ACTIVE').order('expiry_date'),
+      await client
+        .from('batches')
+        .select('*')
+        .in('product_id', ids)
+        .eq('status', 'ACTIVE')
+        .order('expiry_date'),
       []
     );
-    const packageRows = unwrap(await client.from('product_packages').select('*').in('product_id', ids), []);
+
+    const packageRows = unwrap(
+      await client
+        .from('product_packages')
+        .select('*')
+        .in('product_id', ids),
+      []
+    );
 
     const batches = batchRows.map(b => ({ ...batchFromRow(b), productId: b.product_id }));
     const packages = packageRows.map(p => ({ ...packageFromRow(p), productId: p.product_id }));
@@ -435,12 +449,38 @@ class GefDatabase {
 
   async getProductById(id) {
     const client = requireClient();
-    const row = unwrap(await client.from('products').select('*').eq('id', id).maybeSingle(), null);
+
+    const row = unwrap(
+      await client
+        .from('products')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle(),
+      null
+    );
+
     if (!row) return null;
-    const batchRows = unwrap(await client.from('batches').select('*').eq('product_id', id).eq('status', 'ACTIVE'), []);
-    const packageRows = unwrap(await client.from('product_packages').select('*').eq('product_id', id), []);
+
+    const batchRows = unwrap(
+      await client
+        .from('batches')
+        .select('*')
+        .eq('product_id', id)
+        .eq('status', 'ACTIVE'),
+      []
+    );
+
+    const packageRows = unwrap(
+      await client
+        .from('product_packages')
+        .select('*')
+        .eq('product_id', id),
+      []
+    );
+
     const batches = batchRows.map(b => ({ ...batchFromRow(b), productId: b.product_id }));
     const packages = packageRows.map(p => ({ ...packageFromRow(p), productId: p.product_id }));
+
     return productFromRow(row, batches, packages);
   }
 
@@ -452,6 +492,7 @@ class GefDatabase {
   async saveProduct(product) {
     const client = requireClient();
     const isNew = !(await this.getProductById(product.id));
+
     const row = {
       id: product.id,
       store_id: product.storeId || this.getCurrentStoreId(),
@@ -467,16 +508,25 @@ class GefDatabase {
       is_fractional: !!product.isFractional,
       active: product.active !== false
     };
+
     if (isNew) {
       row.current_stock = product.currentStockBase ?? 0;
       row.stock_loja = product.stockByLocation?.LOJA ?? 0;
       row.stock_armazem = product.stockByLocation?.ARMAZEM ?? 0;
       row.stock_patio = product.stockByLocation?.PATIO ?? 0;
     }
+
     unwrap(await client.from('products').upsert(row), null);
 
     if (Array.isArray(product.conversions)) {
-      unwrap(await client.from('product_packages').delete().eq('product_id', product.id), null);
+      unwrap(
+        await client
+          .from('product_packages')
+          .delete()
+          .eq('product_id', product.id),
+        null
+      );
+
       const pkgRows = product.conversions
         .filter(c => c.packagingName && c.multiplierToBase)
         .map(c => ({
@@ -486,8 +536,17 @@ class GefDatabase {
           multiplier_to_base: c.multiplierToBase || c.multiplier || 1,
           sale_price: c.salePrice ?? null
         }));
-      if (pkgRows.length > 0) unwrap(await client.from('product_packages').insert(pkgRows), null);
+
+      if (pkgRows.length > 0) {
+        unwrap(
+          await client
+            .from('product_packages')
+            .insert(pkgRows),
+          null
+        );
+      }
     }
+
     return product;
   }
 
@@ -500,24 +559,46 @@ class GefDatabase {
   async getAllBatches(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('batches').select('*, products(name)').order('expiry_date');
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('batches')
+      .select('*, products(name)')
+      .order('expiry_date');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     const rows = unwrap(await query, []);
-    return rows.map(r => ({ ...batchFromRow(r), productName: r.products?.name }));
+
+    return rows.map(r => ({
+      ...batchFromRow(r),
+      productName: r.products?.name
+    }));
   }
 
   // --- CUSTOMERS ---
   async getCustomers(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('customers').select('*').order('name');
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('customers')
+      .select('*')
+      .order('name');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     const rows = unwrap(await query, []);
+
     return rows.map(customerFromRow);
   }
 
   async saveCustomer(customer) {
     const client = requireClient();
+
     const row = {
       id: customer.id,
       store_id: customer.storeId || this.getCurrentStoreId(),
@@ -529,7 +610,9 @@ class GefDatabase {
       credit_limit: customer.creditLimit ?? 0,
       current_debt: customer.currentDebt ?? customer.creditBalance ?? 0
     };
+
     unwrap(await client.from('customers').upsert(row), null);
+
     return customer;
   }
 
@@ -543,14 +626,24 @@ class GefDatabase {
   async getSuppliers(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('suppliers').select('*').order('name');
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('suppliers')
+      .select('*')
+      .order('name');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     const rows = unwrap(await query, []);
+
     return rows.map(supplierFromRow);
   }
 
   async saveSupplier(supplier) {
     const client = requireClient();
+
     const row = {
       id: supplier.id,
       store_id: supplier.storeId || this.getCurrentStoreId(),
@@ -562,7 +655,9 @@ class GefDatabase {
       notes: supplier.notes,
       active: supplier.active !== false
     };
+
     unwrap(await client.from('suppliers').upsert(row), null);
+
     return supplier;
   }
 
@@ -576,59 +671,108 @@ class GefDatabase {
   async getCashSessions(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('cash_sessions').select('*').order('opened_at', { ascending: false }).limit(200);
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('cash_sessions')
+      .select('*')
+      .order('opened_at', { ascending: false })
+      .limit(200);
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     const rows = unwrap(await query, []);
+
     if (rows.length === 0) return [];
-    const movements = unwrap(await client.from('cash_movements').select('*').in('session_id', rows.map(r => r.id)), []);
+
+    const movements = unwrap(
+      await client
+        .from('cash_movements')
+        .select('*')
+        .in('session_id', rows.map(r => r.id)),
+      []
+    );
+
     return rows.map(r => cashSessionFromRow(r, movements));
   }
 
   async getActiveCashSession(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
+
     if (targetStore === 'ALL') return null;
+
     const row = unwrap(
-      await client.from('cash_sessions').select('*').eq('store_id', targetStore).eq('is_closed', false)
-        .order('opened_at', { ascending: false }).limit(1).maybeSingle(),
+      await client
+        .from('cash_sessions')
+        .select('*')
+        .eq('store_id', targetStore)
+        .eq('is_closed', false)
+        .order('opened_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
       null
     );
+
     if (!row) return null;
-    const movements = unwrap(await client.from('cash_movements').select('*').eq('session_id', row.id), []);
+
+    const movements = unwrap(
+      await client
+        .from('cash_movements')
+        .select('*')
+        .eq('session_id', row.id),
+      []
+    );
+
     return cashSessionFromRow(row, movements);
   }
 
   async openCashSession(storeId, initialCash, cashierName) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    const row = unwrap(await client.rpc('fn_open_cash_session', {
-      p_store_id: targetStore,
-      p_initial_cash: Number(initialCash) || 0,
-      p_cashier_name: cashierName || null
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_open_cash_session', {
+        p_store_id: targetStore,
+        p_initial_cash: Number(initialCash) || 0,
+        p_cashier_name: cashierName || null
+      }),
+      null
+    );
+
     return cashSessionFromRow(row, []);
   }
 
   async closeCashSession(sessionId, countedCash, notes) {
     const client = requireClient();
-    const row = unwrap(await client.rpc('fn_close_cash_session', {
-      p_session_id: sessionId,
-      p_counted_cash: countedCash,
-      p_notes: notes || null,
-      p_operator_id: null
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_close_cash_session', {
+        p_session_id: sessionId,
+        p_counted_cash: countedCash,
+        p_notes: notes || null,
+        p_operator_id: null
+      }),
+      null
+    );
+
     return cashSessionFromRow(row, []);
   }
 
   async registerCashMovement(sessionId, type, amount, reason, notes) {
     const client = requireClient();
-    return unwrap(await client.rpc('fn_register_cash_movement', {
-      p_session_id: sessionId,
-      p_type: type,
-      p_amount: amount,
-      p_reason: reason,
-      p_notes: notes || null
-    }), null);
+
+    return unwrap(
+      await client.rpc('fn_register_cash_movement', {
+        p_session_id: sessionId,
+        p_type: type,
+        p_amount: amount,
+        p_reason: reason,
+        p_notes: notes || null
+      }),
+      null
+    );
   }
 
   async registerSangria(sessionId, amount, reason, destination = 'SANGRIA_SAFE') {
@@ -645,8 +789,16 @@ class GefDatabase {
 
   async getCashMovements(sessionId) {
     const client = requireClient();
-    let query = client.from('cash_movements').select('*').order('created_at', { ascending: false });
-    if (sessionId) query = query.eq('session_id', sessionId);
+
+    let query = client
+      .from('cash_movements')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (sessionId) {
+      query = query.eq('session_id', sessionId);
+    }
+
     return unwrap(await query, []);
   }
 
@@ -654,48 +806,105 @@ class GefDatabase {
   async getSales(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('sales').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('sales')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     const rows = unwrap(await query, []);
+
     if (rows.length === 0) return [];
+
     const ids = rows.map(r => r.id);
-    const itemRows = unwrap(await client.from('sale_items').select('*').in('sale_id', ids), []);
-    const items = itemRows.map(i => ({ ...saleItemFromRow(i), saleId: i.sale_id }));
+
+    const itemRows = unwrap(
+      await client
+        .from('sale_items')
+        .select('*')
+        .in('sale_id', ids),
+      []
+    );
+
+    const items = itemRows.map(i => ({
+      ...saleItemFromRow(i),
+      saleId: i.sale_id
+    }));
+
     return rows.map(r => saleFromRow(r, items));
   }
 
   async getSaleById(saleId) {
     const client = requireClient();
-    const row = unwrap(await client.from('sales').select('*').eq('id', saleId).maybeSingle(), null);
+
+    const row = unwrap(
+      await client
+        .from('sales')
+        .select('*')
+        .eq('id', saleId)
+        .maybeSingle(),
+      null
+    );
+
     if (!row) return null;
-    const itemRows = unwrap(await client.from('sale_items').select('*').eq('sale_id', saleId), []);
-    return saleFromRow(row, itemRows.map(saleItemFromRow));
+
+    const itemRows = unwrap(
+      await client
+        .from('sale_items')
+        .select('*')
+        .eq('sale_id', saleId),
+      []
+    );
+
+    return saleFromRow(
+      row,
+      itemRows.map(saleItemFromRow)
+    );
   }
 
-  async processAtomicSale(storeId, sessionId, customerName, customerTaxId, paymentMethod, discountAmount, items, extraInfo = {}) {
+  async processAtomicSale(
+    storeId,
+    sessionId,
+    customerName,
+    customerTaxId,
+    paymentMethod,
+    discountAmount,
+    items,
+    extraInfo = {}
+  ) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    const row = unwrap(await client.rpc('fn_process_atomic_sale', {
-      p_store_id: targetStore,
-      p_session_id: sessionId || null,
-      p_customer_id: extraInfo.customerId || null,
-      p_customer_name: customerName,
-      p_payment_method: paymentMethod,
-      p_discount: discountAmount || 0,
-      p_items: items.map(it => ({
-        productId: it.productId,
-        quantity: it.quantity,
-        unitPrice: it.unitPrice,
-        multiplierToBase: it.multiplierToBase || it.multiplier || 1,
-        packagingName: it.packagingName || it.packageName || it.selectedUnit || null
-      })),
-      p_operator_id: null,
-      p_notes: extraInfo.notes || null,
-      p_cashier_name: extraInfo.cashierName || null,
-      p_payment_details: extraInfo.paymentDetails || {},
-      p_needs_delivery: !!extraInfo.needsDelivery
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_process_atomic_sale', {
+        p_store_id: targetStore,
+        p_session_id: sessionId || null,
+        p_customer_id: extraInfo.customerId || null,
+        p_customer_name: customerName,
+        p_payment_method: paymentMethod,
+        p_discount: discountAmount || 0,
+        p_items: items.map(it => ({
+          productId: it.productId,
+          quantity: it.quantity,
+          unitPrice: it.unitPrice,
+          multiplierToBase: it.multiplierToBase || it.multiplier || 1,
+          packagingName: it.packagingName || it.packageName || it.selectedUnit || null
+        })),
+        p_operator_id: null,
+        p_notes: extraInfo.notes || null,
+        p_cashier_name: extraInfo.cashierName || null,
+        p_payment_details: extraInfo.paymentDetails || {},
+        p_needs_delivery: !!extraInfo.needsDelivery
+      }),
+      null
+    );
+
     const sale = await this.getSaleById(row.id);
+
     return {
       success: true,
       sale_id: sale.id,
@@ -710,7 +919,16 @@ class GefDatabase {
 
   async reverseSale(saleId, reason) {
     const client = requireClient();
-    unwrap(await client.rpc('fn_reverse_sale', { p_sale_id: saleId, p_reason: reason, p_operator_id: null }), null);
+
+    unwrap(
+      await client.rpc('fn_reverse_sale', {
+        p_sale_id: saleId,
+        p_reason: reason,
+        p_operator_id: null
+      }),
+      null
+    );
+
     return true;
   }
 
@@ -718,24 +936,37 @@ class GefDatabase {
   async getPurchases(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('purchases').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('purchases')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     return unwrap(await query, []).map(purchaseFromRow);
   }
 
   async savePurchase(purchase, operatorId) {
     const client = requireClient();
     const targetStore = purchase.storeId || this.getCurrentStoreId();
-    const row = unwrap(await client.rpc('fn_confirm_purchase', {
-      p_store_id: targetStore,
-      p_supplier_id: purchase.supplierId || null,
-      p_supplier_name: purchase.supplierName || null,
-      p_invoice_number: purchase.invoiceNumber || null,
-      p_destination_location: purchase.destinationLocation || 'ARMAZEM',
-      p_items: purchase.items || [],
-      p_operator_id: null,
-      p_notes: purchase.notes || null
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_confirm_purchase', {
+        p_store_id: targetStore,
+        p_supplier_id: purchase.supplierId || null,
+        p_supplier_name: purchase.supplierName || null,
+        p_invoice_number: purchase.invoiceNumber || null,
+        p_destination_location: purchase.destinationLocation || 'ARMAZEM',
+        p_items: purchase.items || [],
+        p_operator_id: null,
+        p_notes: purchase.notes || null
+      }),
+      null
+    );
+
     return row;
   }
 
@@ -743,23 +974,36 @@ class GefDatabase {
   async getLosses(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('losses').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('losses')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     return unwrap(await query, []).map(lossFromRow);
   }
 
   async registerLoss(loss) {
     const client = requireClient();
     const targetStore = loss.storeId || this.getCurrentStoreId();
-    const row = unwrap(await client.rpc('fn_register_loss', {
-      p_store_id: targetStore,
-      p_product_id: loss.productId,
-      p_quantity_base: loss.quantityBase || loss.quantity,
-      p_location: loss.location || 'LOJA',
-      p_reason: loss.reason,
-      p_operator_id: null,
-      p_notes: loss.notes || null
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_register_loss', {
+        p_store_id: targetStore,
+        p_product_id: loss.productId,
+        p_quantity_base: loss.quantityBase || loss.quantity,
+        p_location: loss.location || 'LOJA',
+        p_reason: loss.reason,
+        p_operator_id: null,
+        p_notes: loss.notes || null
+      }),
+      null
+    );
+
     return lossFromRow(row);
   }
 
@@ -767,13 +1011,22 @@ class GefDatabase {
   async getQuotes(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('quotes').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('quotes')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     return unwrap(await query, []).map(quoteFromRow);
   }
 
   async saveQuote(quote) {
     const client = requireClient();
+
     const row = {
       id: quote.id,
       store_id: quote.storeId || this.getCurrentStoreId(),
@@ -789,13 +1042,23 @@ class GefDatabase {
       status: quote.status || 'RASCUNHO',
       updated_at: new Date().toISOString()
     };
+
     unwrap(await client.from('quotes').upsert(row), null);
+
     return quote;
   }
 
   async deleteQuote(id) {
     const client = requireClient();
-    unwrap(await client.from('quotes').delete().eq('id', id), null);
+
+    unwrap(
+      await client
+        .from('quotes')
+        .delete()
+        .eq('id', id),
+      null
+    );
+
     return true;
   }
 
@@ -803,13 +1066,22 @@ class GefDatabase {
   async getDeliveries(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('deliveries').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('deliveries')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     return unwrap(await query, []).map(deliveryFromRow);
   }
 
   async saveDelivery(delivery) {
     const client = requireClient();
+
     const row = {
       id: delivery.id,
       store_id: delivery.storeId || this.getCurrentStoreId(),
@@ -823,17 +1095,34 @@ class GefDatabase {
       status: delivery.status || 'PENDENTE',
       scheduled_date: delivery.scheduledDate || null,
       dispatched_at: delivery.dispatchedAt || null,
-      delivered_at: delivery.status === 'ENTREGUE' ? (delivery.deliveredAt || new Date().toISOString()) : null,
+      delivered_at: delivery.status === 'ENTREGUE'
+        ? (delivery.deliveredAt || new Date().toISOString())
+        : null,
       items: delivery.items || [],
       notes: delivery.notes || null
     };
-    unwrap(await client.from('deliveries').upsert(row), null);
+
+    unwrap(
+      await client
+        .from('deliveries')
+        .upsert(row),
+      null
+    );
+
     return delivery;
   }
 
   async deleteDelivery(id) {
     const client = requireClient();
-    unwrap(await client.from('deliveries').delete().eq('id', id), null);
+
+    unwrap(
+      await client
+        .from('deliveries')
+        .delete()
+        .eq('id', id),
+      null
+    );
+
     return true;
   }
 
@@ -841,23 +1130,35 @@ class GefDatabase {
   async getTransfers(storeId) {
     const client = requireClient();
     const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('transfers').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+
+    let query = client
+      .from('transfers')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
     return unwrap(await query, []).map(transferFromRow);
   }
 
   async saveTransfer(transfer, operatorId) {
     const client = requireClient();
     const targetStore = transfer.storeId || this.getCurrentStoreId();
-    return unwrap(await client.rpc('fn_transfer_stock', {
-      p_store_id: targetStore,
-      p_product_id: transfer.productId,
-      p_quantity_base: transfer.quantityBase,
-      p_from_location: transfer.fromLocation,
-      p_to_location: transfer.toLocation,
-      p_operator_id: null,
-      p_notes: transfer.notes || null
-    }), null);
+
+    return unwrap(
+      await client.rpc('fn_transfer_stock', {
+        p_store_id: targetStore,
+        p_product_id: transfer.productId,
+        p_quantity_base: transfer.quantityBase,
+        p_from_location: transfer.fromLocation,
+        p_to_location: transfer.toLocation,
+        p_operator_id: null,
+        p_notes: transfer.notes || null
+      }),
+      null
+    );
   }
 
   async transferStock(transferObj, operatorId) {
@@ -867,60 +1168,224 @@ class GefDatabase {
   // --- CUSTOMER CREDIT & PAYMENTS (via RPC) ---
   async getCustomerCreditHistory(customerId) {
     const client = requireClient();
+
     return unwrap(
-      await client.from('credit_transactions').select('*').eq('customer_id', customerId).order('created_at', { ascending: false }),
+      await client
+        .from('credit_transactions')
+        .select('*')
+        .eq('customer_id', customerId)
+        .order('created_at', { ascending: false }),
       []
     );
   }
 
-  async registerCustomerPayment(customerId, amount, paymentMethod, sessionId, notes) {
+  async registerCustomerPayment(
+    customerId,
+    amount,
+    paymentMethod,
+    sessionId,
+    notes
+  ) {
     const client = requireClient();
-    const row = unwrap(await client.rpc('fn_register_customer_payment', {
-      p_customer_id: customerId,
-      p_amount: amount,
-      p_notes: notes || 'Pagamento de conta',
-      p_operator_id: null,
-      p_payment_method: paymentMethod || 'DINHEIRO',
-      p_session_id: sessionId || null
-    }), null);
+
+    const row = unwrap(
+      await client.rpc('fn_register_customer_payment', {
+        p_customer_id: customerId,
+        p_amount: amount,
+        p_notes: notes || 'Pagamento de conta',
+        p_operator_id: null,
+        p_payment_method: paymentMethod || 'DINHEIRO',
+        p_session_id: sessionId || null
+      }),
+      null
+    );
+
     return customerFromRow(row);
   }
 
+  // ============================================================
   // --- AMBASSADORS & PARTNERS ---
-  // Sem seed fictício: se não houver embaixadores cadastrados, a lista vem vazia.
+  // ============================================================
+  //
+  // REGRA DE SEGURANÇA:
+  //
+  // SUPERADMIN:
+  //   Pode consultar todos os embaixadores.
+  //
+  // EMBAIXADOR:
+  //   Só pode consultar o registro cujo user_id corresponde
+  //   ao utilizador autenticado no Supabase Auth.
+  //
+  // A proteção definitiva deverá também existir no Supabase/RLS.
+  // Este filtro no cliente NÃO substitui RLS.
+  //
+  // ============================================================
+
   async getAmbassadors() {
     const client = requireClient();
-    const rows = unwrap(await client.from('ambassadors').select('*, ambassador_referred_stores(*), ambassador_payouts(*)'), []);
+
+    // Descobre o utilizador atualmente autenticado no Supabase.
+    const {
+      data: { user },
+      error: userError
+    } = await client.auth.getUser();
+
+    if (userError) {
+      throw new Error(
+        userError.message ||
+        'Não foi possível identificar o utilizador autenticado.'
+      );
+    }
+
+    if (!user) {
+      throw new Error(
+        'Utilizador não autenticado.'
+      );
+    }
+
+    // Descobre o papel real através do perfil.
+    const profile = unwrap(
+      await client
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .maybeSingle(),
+      null
+    );
+
+    const role = String(
+      profile?.role ||
+      user.app_metadata?.role ||
+      user.user_metadata?.role ||
+      ''
+    ).toUpperCase();
+
+    let query = client
+      .from('ambassadors')
+      .select('*, ambassador_referred_stores(*), ambassador_payouts(*)');
+
+    // SUPERADMIN vê todos.
+    if (role !== 'SUPERADMIN') {
+      // Qualquer outro utilizador só pode receber o seu próprio embaixador.
+      query = query.eq('user_id', user.id);
+    }
+
+    const rows = unwrap(
+      await query,
+      []
+    );
+
     return rows.map(a => ({
       id: a.id,
+
+      // Ligação entre o embaixador e a conta Supabase Auth.
+      userId: a.user_id || null,
+
       name: a.name,
       phone: a.phone,
       pixMpesa: a.pix_mpesa,
       paymentDetails: a.pix_mpesa,
+
       code: a.referral_code,
-      commissionRate: Number(a.commission_rate || 0),
-      pendingCommissions: Number(a.pending_commissions || 0),
-      paidCommissions: Number(a.total_earned || 0),
-      status: a.active ? 'ATIVO' : 'INATIVO',
-      registeredStores: (a.ambassador_referred_stores || []).map(s => ({
-        id: s.id, name: s.name, ownerName: s.owner_name, phone: s.phone, city: s.city,
-        monthlyFee: Number(s.monthly_fee), paymentStatus: s.payment_status,
-        commissionRate: Number(s.commission_rate), totalCommissionEarned: Number(s.total_commission_earned)
-      })),
-      payoutHistory: (a.ambassador_payouts || []).map(p => ({
-        id: p.id, date: p.created_at, amount: Number(p.amount), method: p.method, receipt: p.receipt, status: p.status
-      })),
-      totalStores: (a.ambassador_referred_stores || []).length,
-      activeStores: (a.ambassador_referred_stores || []).filter(s => s.payment_status === 'PAGO').length
+
+      commissionRate:
+        Number(a.commission_rate || 0),
+
+      pendingCommissions:
+        Number(a.pending_commissions || 0),
+
+      paidCommissions:
+        Number(a.total_earned || 0),
+
+      status:
+        a.active ? 'ATIVO' : 'INATIVO',
+
+      registeredStores:
+        (a.ambassador_referred_stores || []).map(s => ({
+          id: s.id,
+          ambassadorId: s.ambassador_id,
+          name: s.name,
+          ownerName: s.owner_name,
+          phone: s.phone,
+          city: s.city,
+
+          monthlyFee:
+            Number(s.monthly_fee || 0),
+
+          paymentStatus:
+            s.payment_status,
+
+          commissionRate:
+            Number(s.commission_rate || 0),
+
+          contractDurationMonths:
+            Number(s.contract_duration_months || 0),
+
+          totalCommissionEarned:
+            Number(s.total_commission_earned || 0),
+
+          registeredAt:
+            s.created_at || null,
+
+          lastPaymentDate:
+            s.last_payment_date || null,
+
+          nextDueDate:
+            s.next_due_date || null,
+
+          monthsActive:
+            Number(s.months_active || 0),
+
+          commissionDurationText:
+            s.commission_duration_text || null
+        })),
+
+      payoutHistory:
+        (a.ambassador_payouts || []).map(p => ({
+          id: p.id,
+          ambassadorId: p.ambassador_id,
+          date: p.created_at,
+          amount: Number(p.amount || 0),
+          method: p.method,
+          receipt: p.receipt,
+          status: p.status
+        })),
+
+      totalStores:
+        (a.ambassador_referred_stores || []).length,
+
+      activeStores:
+        (a.ambassador_referred_stores || [])
+          .filter(s => s.payment_status === 'PAGO')
+          .length
     }));
   }
 
   async saveAmbassador(ambassador) {
     const client = requireClient();
-    if (!ambassador.phone) throw new Error('Telefone do embaixador é obrigatório.');
-    const pixMpesa = ambassador.pixMpesa || ambassador.paymentDetails || ambassador.phone;
+
+    if (!ambassador.phone) {
+      throw new Error(
+        'Telefone do embaixador é obrigatório.'
+      );
+    }
+
+    const pixMpesa =
+      ambassador.pixMpesa ||
+      ambassador.paymentDetails ||
+      ambassador.phone;
+
+    /*
+     * Se userId foi informado explicitamente,
+     * grava a ligação com auth.users.
+     *
+     * Para o cadastro inicial feito pelo Super Admin,
+     * user_id pode continuar NULL até associarmos
+     * a conta Supabase Auth do embaixador.
+     */
     const row = {
       id: ambassador.id,
+      user_id: ambassador.userId || null,
       name: ambassador.name,
       phone: ambassador.phone,
       pix_mpesa: pixMpesa,
@@ -928,60 +1393,186 @@ class GefDatabase {
       commission_rate: ambassador.commissionRate ?? 15,
       active: ambassador.status !== 'INATIVO'
     };
-    unwrap(await client.from('ambassadors').upsert(row), null);
+
+    unwrap(
+      await client
+        .from('ambassadors')
+        .upsert(row),
+      null
+    );
+
     return ambassador;
   }
 
-  async addAmbassadorReferredStore(ambassadorId, storeData) {
+  async addAmbassadorReferredStore(
+    ambassadorId,
+    storeData
+  ) {
     const client = requireClient();
-    const commissionRate = Number(storeData.commissionRate) || 15;
-    const monthlyFee = Number(storeData.monthlyFee) || 0;
-    const commissionEarned = storeData.paymentStatus === 'PAGO' ? Number((monthlyFee * commissionRate / 100).toFixed(2)) : 0;
+
+    const commissionRate =
+      Number(storeData.commissionRate) || 15;
+
+    const monthlyFee =
+      Number(storeData.monthlyFee) || 0;
+
+    const commissionEarned =
+      storeData.paymentStatus === 'PAGO'
+        ? Number(
+            (
+              monthlyFee *
+              commissionRate /
+              100
+            ).toFixed(2)
+          )
+        : 0;
+
     const row = {
-      id: 'store-ref-' + Date.now(),
-      ambassador_id: ambassadorId,
-      name: storeData.name,
-      owner_name: storeData.ownerName,
-      phone: storeData.phone,
-      city: storeData.city,
-      monthly_fee: monthlyFee,
-      payment_status: storeData.paymentStatus || 'PENDENTE',
-      commission_rate: commissionRate,
-      contract_duration_months: Number(storeData.contractDurationMonths) || 12,
-      total_commission_earned: commissionEarned
+      id:
+        'store-ref-' +
+        Date.now(),
+
+      ambassador_id:
+        ambassadorId,
+
+      name:
+        storeData.name,
+
+      owner_name:
+        storeData.ownerName,
+
+      phone:
+        storeData.phone,
+
+      city:
+        storeData.city,
+
+      monthly_fee:
+        monthlyFee,
+
+      payment_status:
+        storeData.paymentStatus ||
+        'PENDENTE',
+
+      commission_rate:
+        commissionRate,
+
+      contract_duration_months:
+        Number(
+          storeData.contractDurationMonths
+        ) || 12,
+
+      total_commission_earned:
+        commissionEarned
     };
-    unwrap(await client.from('ambassador_referred_stores').insert(row), null);
+
+    unwrap(
+      await client
+        .from('ambassador_referred_stores')
+        .insert(row),
+      null
+    );
 
     if (commissionEarned > 0) {
-      const amb = unwrap(await client.from('ambassadors').select('pending_commissions').eq('id', ambassadorId).maybeSingle(), null);
+      const amb = unwrap(
+        await client
+          .from('ambassadors')
+          .select('pending_commissions')
+          .eq('id', ambassadorId)
+          .maybeSingle(),
+        null
+      );
+
       if (amb) {
-        unwrap(await client.from('ambassadors').update({
-          pending_commissions: Number(amb.pending_commissions || 0) + commissionEarned
-        }).eq('id', ambassadorId), null);
+        unwrap(
+          await client
+            .from('ambassadors')
+            .update({
+              pending_commissions:
+                Number(
+                  amb.pending_commissions || 0
+                ) +
+                commissionEarned
+            })
+            .eq('id', ambassadorId),
+          null
+        );
       }
     }
+
     return row;
   }
 
-  async payAmbassadorCommission(ambassadorId, amount, method, ref) {
+  async payAmbassadorCommission(
+    ambassadorId,
+    amount,
+    method,
+    ref
+  ) {
     const client = requireClient();
-    const amb = unwrap(await client.from('ambassadors').select('*').eq('id', ambassadorId).maybeSingle(), null);
-    if (!amb) throw new Error('Embaixador não encontrado.');
-    const paidAmount = amount && amount > 0 ? amount : Number(amb.pending_commissions || 0);
 
-    unwrap(await client.from('ambassadors').update({
-      pending_commissions: 0,
-      total_earned: Number(amb.total_earned || 0) + paidAmount
-    }).eq('id', ambassadorId), null);
+    const amb = unwrap(
+      await client
+        .from('ambassadors')
+        .select('*')
+        .eq('id', ambassadorId)
+        .maybeSingle(),
+      null
+    );
 
-    unwrap(await client.from('ambassador_payouts').insert({
-      id: 'LIQ-' + Date.now(),
-      ambassador_id: ambassadorId,
-      amount: paidAmount,
-      method: method || 'M-Pesa',
-      receipt: ref || null,
-      status: 'LIQUIDADO'
-    }), null);
+    if (!amb) {
+      throw new Error(
+        'Embaixador não encontrado.'
+      );
+    }
+
+    const paidAmount =
+      amount && amount > 0
+        ? amount
+        : Number(
+            amb.pending_commissions || 0
+          );
+
+    unwrap(
+      await client
+        .from('ambassadors')
+        .update({
+          pending_commissions: 0,
+          total_earned:
+            Number(
+              amb.total_earned || 0
+            ) +
+            paidAmount
+        })
+        .eq('id', ambassadorId),
+      null
+    );
+
+    unwrap(
+      await client
+        .from('ambassador_payouts')
+        .insert({
+          id:
+            'LIQ-' +
+            Date.now(),
+
+          ambassador_id:
+            ambassadorId,
+
+          amount:
+            paidAmount,
+
+          method:
+            method || 'M-Pesa',
+
+          receipt:
+            ref || null,
+
+          status:
+            'LIQUIDADO'
+        }),
+      null
+    );
 
     return true;
   }
@@ -989,37 +1580,123 @@ class GefDatabase {
   // --- SAAS & LOCK ENGINE ---
   // Sem código mestre de desbloqueio no cliente: renovação só via RPC restrita a SUPERADMIN (RLS no banco).
   checkStoreLock(store) {
-    if (!store) return { isLocked: false, daysRemaining: 999, reason: '', store: null };
+    if (!store) {
+      return {
+        isLocked: false,
+        daysRemaining: 999,
+        reason: '',
+        store: null
+      };
+    }
+
     if (store.acesso_ativo === false) {
-      return { isLocked: true, daysRemaining: 0, reason: store.motivo_bloqueio || 'Acesso suspenso pelo administrador do sistema GEF.', store };
+      return {
+        isLocked: true,
+        daysRemaining: 0,
+        reason:
+          store.motivo_bloqueio ||
+          'Acesso suspenso pelo administrador do sistema GEF.',
+        store
+      };
     }
+
     if (store.data_fim_teste) {
-      const diffDays = Math.ceil((new Date(store.data_fim_teste).getTime() - Date.now()) / 86400000);
+      const diffDays =
+        Math.ceil(
+          (
+            new Date(
+              store.data_fim_teste
+            ).getTime() -
+            Date.now()
+          ) /
+          86400000
+        );
+
       if (diffDays <= 0) {
-        return { isLocked: true, daysRemaining: diffDays, reason: `A assinatura da loja expirou em ${new Date(store.data_fim_teste).toLocaleDateString('pt-PT')}. Regularize para continuar faturando.`, store };
+        return {
+          isLocked: true,
+          daysRemaining: diffDays,
+          reason:
+            `A assinatura da loja expirou em ${new Date(store.data_fim_teste).toLocaleDateString('pt-PT')}. Regularize para continuar faturando.`,
+          store
+        };
       }
-      return { isLocked: false, daysRemaining: diffDays, reason: '', store };
+
+      return {
+        isLocked: false,
+        daysRemaining: diffDays,
+        reason: '',
+        store
+      };
     }
-    return { isLocked: false, daysRemaining: 999, reason: '', store };
+
+    return {
+      isLocked: false,
+      daysRemaining: 999,
+      reason: '',
+      store
+    };
   }
 
-  async toggleStoreAccess(storeId, acessoAtivo, motivo) {
+  async toggleStoreAccess(
+    storeId,
+    acessoAtivo,
+    motivo
+  ) {
     const client = requireClient();
-    return unwrap(await client.from('stores').update({
-      acesso_ativo: acessoAtivo,
-      motivo_bloqueio: motivo || (acessoAtivo ? null : 'Assinatura vencida / Bloqueio administrativo')
-    }).eq('id', storeId).select().maybeSingle(), null);
+
+    return unwrap(
+      await client
+        .from('stores')
+        .update({
+          acesso_ativo: acessoAtivo,
+          motivo_bloqueio:
+            motivo ||
+            (
+              acessoAtivo
+                ? null
+                : 'Assinatura vencida / Bloqueio administrativo'
+            )
+        })
+        .eq('id', storeId)
+        .select()
+        .maybeSingle(),
+      null
+    );
   }
 
-  async renewStoreSubscription(storeId, daysToAdd = 30) {
+  async renewStoreSubscription(
+    storeId,
+    daysToAdd = 30
+  ) {
     const client = requireClient();
-    return unwrap(await client.rpc('fn_renew_store_subscription', { p_store_id: storeId, p_days: daysToAdd }), null);
+
+    return unwrap(
+      await client.rpc(
+        'fn_renew_store_subscription',
+        {
+          p_store_id: storeId,
+          p_days: daysToAdd
+        }
+      ),
+      null
+    );
   }
 
   // --- DASHBOARD METRICS ---
   async getDashboardStats(storeId) {
-    const targetStore = storeId || this.getCurrentStoreId();
-    const [products, customers, sales, quotes, deliveries, losses] = await Promise.all([
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    const [
+      products,
+      customers,
+      sales,
+      quotes,
+      deliveries,
+      losses
+    ] = await Promise.all([
       this.getProducts(targetStore),
       this.getCustomers(targetStore),
       this.getSales(targetStore),
@@ -1028,42 +1705,185 @@ class GefDatabase {
       this.getLosses(targetStore)
     ]);
 
-    const todayStr = new Date().toISOString().split('T')[0];
-    const firstDayOfMonth = todayStr.slice(0, 7) + '-01';
-    const validSales = sales.filter(s => s.status === 'CONCLUIDA');
-    const todaySales = validSales.filter(s => (s.createdAt || '').startsWith(todayStr));
-    const monthSales = validSales.filter(s => (s.createdAt || '') >= firstDayOfMonth);
+    const todayStr =
+      new Date()
+        .toISOString()
+        .split('T')[0];
 
-    const totalTodaySales = todaySales.reduce((acc, s) => acc + (s.total || 0), 0);
-    const monthSalesRevenue = monthSales.reduce((acc, s) => acc + (s.total || 0), 0);
+    const firstDayOfMonth =
+      todayStr.slice(0, 7) +
+      '-01';
 
-    const batches = await this.getAllBatches(targetStore);
-    const batchCost = batches.reduce((sum, b) => sum + (b.currentQuantityBase * b.costPerBase), 0);
-    const productCost = products.reduce((sum, p) => sum + (p.currentStockBase * p.costPriceBase), 0);
-    const stockCostTotal = Number((batches.length > 0 ? batchCost : productCost).toFixed(2));
-    const stockSaleValuation = Number(products.reduce((sum, p) => sum + (p.currentStockBase * p.salePriceBase), 0).toFixed(2));
+    const validSales =
+      sales.filter(
+        s => s.status === 'CONCLUIDA'
+      );
 
-    const activeShift = await this.getActiveCashSession(targetStore);
-    const currentCashInDrawer = activeShift ? activeShift.expectedCash || 0 : 0;
+    const todaySales =
+      validSales.filter(
+        s =>
+          (s.createdAt || '')
+            .startsWith(todayStr)
+      );
 
-    const totalReceivable = customers.reduce((sum, c) => sum + (c.currentDebt || 0), 0);
-    const lowStockList = products.filter(p => p.currentStockBase > 0 && p.currentStockBase <= p.minStockAlert);
-    const outOfStockList = products.filter(p => p.currentStockBase <= 0);
-    const totalLossCost = losses.reduce((sum, l) => sum + (l.totalLossCost || 0), 0);
+    const monthSales =
+      validSales.filter(
+        s =>
+          (s.createdAt || '') >=
+          firstDayOfMonth
+      );
+
+    const totalTodaySales =
+      todaySales.reduce(
+        (acc, s) =>
+          acc +
+          (s.total || 0),
+        0
+      );
+
+    const monthSalesRevenue =
+      monthSales.reduce(
+        (acc, s) =>
+          acc +
+          (s.total || 0),
+        0
+      );
+
+    const batches =
+      await this.getAllBatches(
+        targetStore
+      );
+
+    const batchCost =
+      batches.reduce(
+        (sum, b) =>
+          sum +
+          (
+            b.currentQuantityBase *
+            b.costPerBase
+          ),
+        0
+      );
+
+    const productCost =
+      products.reduce(
+        (sum, p) =>
+          sum +
+          (
+            p.currentStockBase *
+            p.costPriceBase
+          ),
+        0
+      );
+
+    const stockCostTotal =
+      Number(
+        (
+          batches.length > 0
+            ? batchCost
+            : productCost
+        ).toFixed(2)
+      );
+
+    const stockSaleValuation =
+      Number(
+        products
+          .reduce(
+            (sum, p) =>
+              sum +
+              (
+                p.currentStockBase *
+                p.salePriceBase
+              ),
+            0
+          )
+          .toFixed(2)
+      );
+
+    const activeShift =
+      await this.getActiveCashSession(
+        targetStore
+      );
+
+    const currentCashInDrawer =
+      activeShift
+        ? activeShift.expectedCash || 0
+        : 0;
+
+    const totalReceivable =
+      customers.reduce(
+        (sum, c) =>
+          sum +
+          (c.currentDebt || 0),
+        0
+      );
+
+    const lowStockList =
+      products.filter(
+        p =>
+          p.currentStockBase > 0 &&
+          p.currentStockBase <=
+            p.minStockAlert
+      );
+
+    const outOfStockList =
+      products.filter(
+        p =>
+          p.currentStockBase <= 0
+      );
+
+    const totalLossCost =
+      losses.reduce(
+        (sum, l) =>
+          sum +
+          (l.totalLossCost || 0),
+        0
+      );
 
     return {
       totalTodaySales,
-      todaySalesCount: todaySales.length,
-      totalRealEquity: Number((stockCostTotal + currentCashInDrawer).toFixed(2)),
+      todaySalesCount:
+        todaySales.length,
+
+      totalRealEquity:
+        Number(
+          (
+            stockCostTotal +
+            currentCashInDrawer
+          ).toFixed(2)
+        ),
+
       stockCostTotal,
       stockSaleValuation,
       currentCashInDrawer,
       totalReceivable,
-      lowStockCount: lowStockList.length,
-      outOfStockCount: outOfStockList.length,
-      pendingQuotesCount: quotes.filter(q => ['RASCUNHO', 'PENDENTE', 'ENVIADO'].includes(q.status)).length,
-      pendingDeliveriesCount: deliveries.filter(d => d.status !== 'ENTREGUE' && d.status !== 'CANCELADA').length,
-      recentSales: sales.slice(0, 8),
+
+      lowStockCount:
+        lowStockList.length,
+
+      outOfStockCount:
+        outOfStockList.length,
+
+      pendingQuotesCount:
+        quotes.filter(
+          q =>
+            [
+              'RASCUNHO',
+              'PENDENTE',
+              'ENVIADO'
+            ].includes(q.status)
+        ).length,
+
+      pendingDeliveriesCount:
+        deliveries.filter(
+          d =>
+            d.status !== 'ENTREGUE' &&
+            d.status !== 'CANCELADA'
+        ).length,
+
+      recentSales:
+        sales.slice(0, 8),
+
       totalLossCost
     };
   }
@@ -1071,31 +1891,85 @@ class GefDatabase {
   // --- AUDIT LOGS (somente leitura; escrita acontece dentro das RPCs) ---
   async getAuditLogs(storeId) {
     const client = requireClient();
-    const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(500);
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
-    return unwrap(await query, []).map(auditFromRow);
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    let query = client
+      .from('audit_logs')
+      .select('*')
+      .order('created_at', {
+        ascending: false
+      })
+      .limit(500);
+
+    if (targetStore !== 'ALL') {
+      query = query.eq(
+        'store_id',
+        targetStore
+      );
+    }
+
+    return unwrap(
+      await query,
+      []
+    ).map(auditFromRow);
   }
 
   // --- INVENTORIES (via RPC) ---
   async getInventories(storeId) {
     const client = requireClient();
-    const targetStore = storeId || this.getCurrentStoreId();
-    let query = client.from('inventories').select('*').order('created_at', { ascending: false });
-    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
-    return unwrap(await query, []).map(inventoryFromRow);
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    let query = client
+      .from('inventories')
+      .select('*')
+      .order('created_at', {
+        ascending: false
+      });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq(
+        'store_id',
+        targetStore
+      );
+    }
+
+    return unwrap(
+      await query,
+      []
+    ).map(inventoryFromRow);
   }
 
-  async saveInventoryAudit({ storeId, operatorId, items, notes, reconcile }) {
+  async saveInventoryAudit({
+    storeId,
+    operatorId,
+    items,
+    notes,
+    reconcile
+  }) {
     const client = requireClient();
-    const targetStore = storeId || this.getCurrentStoreId();
-    const inv = unwrap(await client.rpc('fn_reconcile_inventory', {
-      p_store_id: targetStore,
-      p_items: items,
-      p_notes: notes || '',
-      p_reconcile: !!reconcile,
-      p_operator_id: null
-    }), null);
+
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    const inv = unwrap(
+      await client.rpc(
+        'fn_reconcile_inventory',
+        {
+          p_store_id: targetStore,
+          p_items: items,
+          p_notes: notes || '',
+          p_reconcile: !!reconcile,
+          p_operator_id: null
+        }
+      ),
+      null
+    );
+
     return inventoryFromRow(inv);
   }
 }
