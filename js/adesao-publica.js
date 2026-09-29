@@ -44,15 +44,33 @@ function escapeHtml(value) {
 
 
 /* =========================================================
-   NOME DO EMBAIXADOR
+   FORMATAÇÃO MONETÁRIA
+========================================================= */
+
+function formatMoney(value) {
+
+    const number = Number(value || 0);
+
+    return number.toLocaleString(
+        'pt-MZ',
+        {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        }
+    ) + ' MT';
+}
+
+
+/* =========================================================
+   NOME
 ========================================================= */
 
 function getName(data) {
 
     return (
+        data?.name ||
         data?.full_name ||
         data?.fullName ||
-        data?.name ||
         data?.ambassador_name ||
         'Embaixador GEF'
     );
@@ -60,7 +78,7 @@ function getName(data) {
 
 
 /* =========================================================
-   STATUS DO EMBAIXADOR
+   STATUS
 ========================================================= */
 
 function getStatus(data) {
@@ -95,26 +113,92 @@ function showPublicError(message) {
 
 
 /* =========================================================
-   MOSTRAR DADOS DO EMBAIXADOR
+   MOSTRAR PAINEL FINANCEIRO
+========================================================= */
+
+function renderFinancialPanel() {
+
+    const ambassador =
+        ambassadorData?.ambassador || {};
+
+
+    const total =
+        document.getElementById(
+            'ambassador-total-earned'
+        );
+
+    const pending =
+        document.getElementById(
+            'ambassador-pending'
+        );
+
+    const rate =
+        document.getElementById(
+            'ambassador-commission-rate'
+        );
+
+
+    if (total) {
+
+        total.textContent =
+            formatMoney(
+                ambassador.total_earned
+            );
+    }
+
+
+    if (pending) {
+
+        pending.textContent =
+            formatMoney(
+                ambassador.pending_commissions
+            );
+    }
+
+
+    if (rate) {
+
+        rate.textContent =
+            `${Number(
+                ambassador.commission_rate || 0
+            )}%`;
+    }
+}
+
+
+/* =========================================================
+   MOSTRAR EMBAIXADOR
 ========================================================= */
 
 function renderAmbassador() {
 
     const box =
-        document.getElementById('ambassador-box');
+        document.getElementById(
+            'ambassador-box'
+        );
 
     const name =
-        document.getElementById('ambassador-name');
+        document.getElementById(
+            'ambassador-name'
+        );
 
     const code =
-        document.getElementById('ambassador-code');
+        document.getElementById(
+            'ambassador-code'
+        );
 
     const avatar =
-        document.getElementById('ambassador-avatar');
+        document.getElementById(
+            'ambassador-avatar'
+        );
+
+
+    const ambassador =
+        ambassadorData?.ambassador || {};
 
 
     const ambassadorName =
-        getName(ambassadorData);
+        getName(ambassador);
 
 
     if (name) {
@@ -127,7 +211,10 @@ function renderAmbassador() {
     if (code) {
 
         code.textContent =
-            `Código: ${ambassadorCode}`;
+            `Código: ${
+                ambassador.referral_code ||
+                ambassadorCode
+            }`;
     }
 
 
@@ -146,6 +233,9 @@ function renderAmbassador() {
         box.style.display =
             'block';
     }
+
+
+    renderFinancialPanel();
 }
 
 
@@ -156,10 +246,14 @@ function renderAmbassador() {
 function renderStores() {
 
     const list =
-        document.getElementById('stores-list');
+        document.getElementById(
+            'stores-list'
+        );
 
     const count =
-        document.getElementById('stores-count');
+        document.getElementById(
+            'stores-count'
+        );
 
 
     if (!list) return;
@@ -193,14 +287,45 @@ function renderStores() {
 
             const name =
                 store.name ||
-                store.store_name ||
                 'Loja GEF';
+
+
+            const owner =
+                store.owner_name ||
+                'Não informado';
+
+
+            const phone =
+                store.phone ||
+                'Não informado';
 
 
             const city =
                 store.city ||
-                store.store_city ||
-                '';
+                'Não informada';
+
+
+            const monthlyFee =
+                formatMoney(
+                    store.monthly_fee
+                );
+
+
+            const paymentStatus =
+                store.payment_status ||
+                'PENDENTE';
+
+
+            const commissionRate =
+                Number(
+                    store.commission_rate || 0
+                );
+
+
+            const commission =
+                formatMoney(
+                    store.total_commission_earned
+                );
 
 
             return `
@@ -211,11 +336,55 @@ function renderStores() {
                     </div>
 
                     <div class="store-city">
-                        ${
-                            city
-                                ? `📍 ${escapeHtml(city)}`
-                                : 'Empresa associada ao GEF'
-                        }
+                        📍 ${escapeHtml(city)}
+                    </div>
+
+                    <div class="store-info">
+
+                        <div>
+                            <strong>
+                                Responsável:
+                            </strong>
+                            ${escapeHtml(owner)}
+                        </div>
+
+                        <div>
+                            <strong>
+                                Contacto:
+                            </strong>
+                            ${escapeHtml(phone)}
+                        </div>
+
+                        <div>
+                            <strong>
+                                Mensalidade:
+                            </strong>
+                            ${monthlyFee}
+                        </div>
+
+                        <div>
+                            <strong>
+                                Pagamento:
+                            </strong>
+                            ${escapeHtml(
+                                paymentStatus
+                            )}
+                        </div>
+
+                        <div>
+                            <strong>
+                                Comissão:
+                            </strong>
+                            ${commissionRate}%
+                        </div>
+
+                        <div>
+                            <strong>
+                                Comissão gerada:
+                            </strong>
+                            ${commission}
+                        </div>
+
                     </div>
 
                     <span class="badge badge-emerald">
@@ -230,84 +399,6 @@ function renderStores() {
 
 
 /* =========================================================
-   CARREGAR LOJAS DO EMBAIXADOR
-========================================================= */
-
-async function loadStoresFromRPC() {
-
-    /*
-     * Primeiro tenta obter as lojas
-     * diretamente do resultado do RPC principal.
-     */
-
-    if (
-        Array.isArray(
-            ambassadorData?.referred_stores
-        )
-    ) {
-
-        return ambassadorData.referred_stores;
-    }
-
-
-    if (
-        Array.isArray(
-            ambassadorData?.stores
-        )
-    ) {
-
-        return ambassadorData.stores;
-    }
-
-
-    if (
-        Array.isArray(
-            ambassadorData?.ambassador_referred_stores
-        )
-    ) {
-
-        return ambassadorData.ambassador_referred_stores;
-    }
-
-
-    /*
-     * Se o RPC principal não devolver
-     * as lojas, utiliza a função pública.
-     */
-
-    const {
-        data,
-        error
-    } = await supabase.rpc(
-        'fn_get_public_ambassador_stores',
-        {
-            p_code: ambassadorCode
-        }
-    );
-
-
-    if (error) {
-
-        console.warn(
-            'Lista pública de lojas indisponível:',
-            error
-        );
-
-        return [];
-    }
-
-
-    if (Array.isArray(data)) {
-
-        return data;
-    }
-
-
-    return [];
-}
-
-
-/* =========================================================
    CONFIGURAR BOTÃO DE ADESÃO
 ========================================================= */
 
@@ -317,7 +408,6 @@ function configureCTA() {
         document.getElementById(
             'register-store-btn'
         );
-
 
     const formSection =
         document.getElementById(
@@ -331,14 +421,13 @@ function configureCTA() {
     }
 
 
+    const ambassador =
+        ambassadorData?.ambassador || {};
+
+
     const status =
-        getStatus(ambassadorData);
+        getStatus(ambassador);
 
-
-    /*
-     * Estados que não podem receber
-     * novas adesões.
-     */
 
     const blocked =
         status === 'BLOCKED' ||
@@ -383,11 +472,6 @@ function configureCTA() {
     }
 
 
-    /*
-     * Embaixador ATIVO:
-     * permite abrir o formulário.
-     */
-
     button.addEventListener(
         'click',
         () => {
@@ -407,7 +491,7 @@ function configureCTA() {
 
 
 /* =========================================================
-   CARREGAR EMBAIXADOR
+   CARREGAR PAINEL
 ========================================================= */
 
 async function loadAmbassador() {
@@ -415,10 +499,6 @@ async function loadAmbassador() {
     ambassadorCode =
         getAmbassadorCode();
 
-
-    /*
-     * Verifica código na URL.
-     */
 
     if (!ambassadorCode) {
 
@@ -429,10 +509,6 @@ async function loadAmbassador() {
         return;
     }
 
-
-    /*
-     * Verifica ligação ao Supabase.
-     */
 
     if (
         !isSupabaseConfigured() ||
@@ -453,20 +529,11 @@ async function loadAmbassador() {
 
     try {
 
-        /*
-         * IMPORTANTE:
-         *
-         * A função SQL recebe:
-         * p_referral_code
-         *
-         * e não p_code.
-         */
-
         const {
             data,
             error
         } = await supabase.rpc(
-            'fn_validate_ambassador_code',
+            'fn_get_public_ambassador_dashboard',
             {
                 p_referral_code:
                     ambassadorCode
@@ -477,13 +544,13 @@ async function loadAmbassador() {
         if (error) {
 
             console.error(
-                'Erro ao validar embaixador:',
+                'Erro ao carregar painel do embaixador:',
                 error
             );
 
 
             showPublicError(
-                'Não foi possível validar o link do embaixador.'
+                'Não foi possível carregar o painel do embaixador.'
             );
 
             return;
@@ -500,61 +567,44 @@ async function loadAmbassador() {
         }
 
 
-        /*
-         * Aceita tanto objeto quanto array.
-         */
-
-        ambassadorData =
-            Array.isArray(data)
-                ? data[0]
-                : data;
-
-
-        if (!ambassadorData) {
+        if (data.valid === false) {
 
             showPublicError(
-                'Embaixador não encontrado.'
+                data.message ||
+                'Este link de embaixador não é válido.'
             );
 
             return;
         }
 
 
-        /*
-         * Mostra dados públicos.
-         */
+        ambassadorData =
+            data;
+
+
+        stores =
+            Array.isArray(data.stores)
+                ? data.stores
+                : [];
+
 
         renderAmbassador();
 
-
-        /*
-         * Carrega lojas já indicadas.
-         */
-
-        stores =
-            await loadStoresFromRPC();
-
-
         renderStores();
 
-
-        /*
-         * Configura botão conforme
-         * o estado do embaixador.
-         */
-
         configureCTA();
+
 
     } catch (error) {
 
         console.error(
-            'Erro na página pública de adesão:',
+            'Erro na página pública do embaixador:',
             error
         );
 
 
         showPublicError(
-            'Ocorreu um erro ao carregar a página de adesão.'
+            'Ocorreu um erro ao carregar o painel do embaixador.'
         );
     }
 }
