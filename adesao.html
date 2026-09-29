@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="./css/layout.css">
 
     <style>
+
         .adesao-page {
             min-height: 100vh;
             background: var(--bg-primary);
@@ -178,6 +179,49 @@
             font-size: 11px;
         }
 
+
+        /* =====================================================
+           RESUMO FINANCEIRO
+        ===================================================== */
+
+        .financial-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+
+        .financial-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+        }
+
+        .financial-label {
+            color: var(--text-muted);
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            margin-bottom: 8px;
+        }
+
+        .financial-value {
+            font-size: 22px;
+            font-weight: 900;
+            color: var(--text-primary);
+        }
+
+        .financial-card.rate .financial-value {
+            color: var(--accent-amber);
+        }
+
+
+        /* =====================================================
+           SEÇÕES
+        ===================================================== */
+
         .section-card {
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
@@ -208,7 +252,7 @@
 
         .stores-list {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
             gap: 12px;
         }
 
@@ -236,7 +280,27 @@
         .store-city {
             color: var(--text-secondary);
             font-size: 11px;
-            margin-bottom: 10px;
+            margin-bottom: 12px;
+        }
+
+        .store-info {
+            display: grid;
+            gap: 7px;
+            color: var(--text-secondary);
+            font-size: 11px;
+            line-height: 1.5;
+        }
+
+        .store-info strong {
+            color: var(--text-primary);
+        }
+
+        .store-commission {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-subtle);
+            color: var(--accent-emerald);
+            font-weight: 700;
         }
 
         .empty-stores {
@@ -246,6 +310,11 @@
             border: 1px dashed var(--border-color);
             border-radius: var(--radius-md);
         }
+
+
+        /* =====================================================
+           CTA
+        ===================================================== */
 
         .cta-card {
             background:
@@ -279,6 +348,11 @@
             flex-shrink: 0;
         }
 
+
+        /* =====================================================
+           FORMULÁRIO
+        ===================================================== */
+
         .form-section {
             display: none;
             animation: fadeIn .2s ease-out forwards;
@@ -311,6 +385,11 @@
             display: flex;
             justify-content: flex-end;
         }
+
+
+        /* =====================================================
+           MENSAGENS
+        ===================================================== */
 
         .message {
             display: none;
@@ -350,13 +429,23 @@
             line-height: 1.6;
         }
 
+
+        /* =====================================================
+           RESPONSIVO
+        ===================================================== */
+
         @media (max-width: 700px) {
+
             .adesao-main {
                 padding: 18px 12px 35px;
             }
 
             .hero-card {
                 padding: 22px;
+            }
+
+            .financial-grid {
+                grid-template-columns: 1fr;
             }
 
             .cta-card {
@@ -376,8 +465,10 @@
                 grid-column: auto;
             }
         }
+
     </style>
 </head>
+
 
 <body>
 
@@ -392,6 +483,7 @@
             </div>
 
             <div class="adesao-brand-text">
+
                 <div class="adesao-brand-title">
                     GEF - Gestão Financeira
                 </div>
@@ -399,6 +491,7 @@
                 <div class="adesao-brand-sub">
                     Plataforma de gestão empresarial
                 </div>
+
             </div>
 
         </div>
@@ -408,7 +501,11 @@
 
     <main class="adesao-main">
 
-        <!-- APRESENTAÇÃO -->
+
+        <!-- =====================================================
+             APRESENTAÇÃO
+        ====================================================== -->
+
         <section class="hero-card animate-fade">
 
             <div class="hero-label">
@@ -416,13 +513,12 @@
             </div>
 
             <h1 class="hero-title">
-                Faça parte da rede GEF
+                Painel do Embaixador
             </h1>
 
             <p class="hero-description">
-                Conheça as empresas associadas a este embaixador e,
-                quando estiver pronto, cadastre a sua própria loja
-                na plataforma GEF.
+                Acompanhe as suas lojas indicadas, comissões e
+                resultados através deste link personalizado.
             </p>
 
 
@@ -469,7 +565,69 @@
         </section>
 
 
-        <!-- LOJAS -->
+        <!-- =====================================================
+             RESUMO FINANCEIRO
+        ====================================================== -->
+
+        <section
+            id="financial-section"
+            class="financial-grid animate-fade"
+        >
+
+            <div class="financial-card">
+
+                <div class="financial-label">
+                    Total ganho
+                </div>
+
+                <div
+                    id="ambassador-total-earned"
+                    class="financial-value"
+                >
+                    0,00 MT
+                </div>
+
+            </div>
+
+
+            <div class="financial-card">
+
+                <div class="financial-label">
+                    Comissões pendentes
+                </div>
+
+                <div
+                    id="ambassador-pending"
+                    class="financial-value"
+                >
+                    0,00 MT
+                </div>
+
+            </div>
+
+
+            <div class="financial-card rate">
+
+                <div class="financial-label">
+                    Taxa de comissão
+                </div>
+
+                <div
+                    id="ambassador-commission-rate"
+                    class="financial-value"
+                >
+                    0%
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <!-- =====================================================
+             LOJAS
+        ====================================================== -->
+
         <section
             id="stores-section"
             class="section-card animate-fade"
@@ -478,6 +636,7 @@
             <div class="section-header">
 
                 <div>
+
                     <div class="section-title">
                         Lojas associadas
                     </div>
@@ -485,6 +644,7 @@
                     <div class="section-description">
                         Empresas já registadas através deste embaixador.
                     </div>
+
                 </div>
 
                 <span
@@ -496,19 +656,25 @@
 
             </div>
 
+
             <div
                 id="stores-list"
                 class="stores-list"
             >
+
                 <div class="empty-stores">
                     A carregar informações...
                 </div>
+
             </div>
 
         </section>
 
 
-        <!-- CTA -->
+        <!-- =====================================================
+             CTA
+        ====================================================== -->
+
         <section
             id="cta-section"
             class="cta-card animate-fade"
@@ -537,7 +703,10 @@
         </section>
 
 
-        <!-- BLOQUEIO -->
+        <!-- =====================================================
+             BLOQUEIO
+        ====================================================== -->
+
         <section
             id="blocked-card"
             class="blocked-card"
@@ -547,7 +716,10 @@
         </section>
 
 
-        <!-- FORMULÁRIO -->
+        <!-- =====================================================
+             FORMULÁRIO
+        ====================================================== -->
+
         <section
             id="form-section"
             class="section-card form-section"
@@ -556,6 +728,7 @@
             <div class="card-header">
 
                 <div>
+
                     <div class="card-title">
                         Registar minha loja
                     </div>
@@ -563,6 +736,7 @@
                     <div class="section-description">
                         Preencha os dados da empresa e do administrador.
                     </div>
+
                 </div>
 
             </div>
@@ -571,6 +745,7 @@
             <form id="adesao-form">
 
                 <div class="form-grid">
+
 
                     <div class="form-group full">
 
@@ -763,18 +938,30 @@
         </section>
 
 
+        <!-- =====================================================
+             MENSAGEM PÚBLICA
+        ====================================================== -->
+
         <div
             id="public-message"
             class="message public-message"
         ></div>
+
 
     </main>
 
 </div>
 
 
-<script type="module" src="./js/adesao-publica.js"></script>
-<script type="module" src="./js/adesao.js"></script>
+<script
+    type="module"
+    src="./js/adesao-publica.js"
+></script>
+
+<script
+    type="module"
+    src="./js/adesao.js"
+></script>
 
 </body>
 </html>
