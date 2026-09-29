@@ -42,6 +42,7 @@ export async function initEmbaixadoresModule(container) {
         basePath = pathname;
       } else {
         const lastSlash = pathname.lastIndexOf('/');
+
         basePath = lastSlash >= 0
           ? pathname.substring(0, lastSlash + 1)
           : '/';
@@ -52,11 +53,77 @@ export async function initEmbaixadoresModule(container) {
       }
 
     } catch (error) {
-      console.warn('Não foi possível determinar o caminho base:', error);
+      console.warn(
+        'Não foi possível determinar o caminho base:',
+        error
+      );
+
       basePath = '/';
     }
 
     return `${window.location.origin}${basePath}adesao.html?embaixador=${code}`;
+  };
+
+  /**
+   * Copia texto para o clipboard.
+   * Usa Clipboard API quando disponível e fallback
+   * para navegadores onde ela não estiver disponível.
+   */
+  const copyTextToClipboard = async (text) => {
+    if (!text) {
+      return false;
+    }
+
+    try {
+      if (
+        navigator.clipboard &&
+        navigator.clipboard.writeText
+      ) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (error) {
+      console.warn(
+        'Clipboard API indisponível. Tentando método alternativo:',
+        error
+      );
+    }
+
+    try {
+      const textarea =
+        document.createElement('textarea');
+
+      textarea.value = text;
+
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      textarea.style.top = '0';
+      textarea.style.opacity = '0';
+
+      document.body.appendChild(textarea);
+
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(
+        0,
+        textarea.value.length
+      );
+
+      const copied =
+        document.execCommand('copy');
+
+      textarea.remove();
+
+      return copied;
+
+    } catch (error) {
+      console.error(
+        'Falha no método alternativo de cópia:',
+        error
+      );
+
+      return false;
+    }
   };
 
   const render = async () => {
@@ -82,14 +149,19 @@ export async function initEmbaixadoresModule(container) {
     const ambassadors = await db.getAmbassadors();
 
     if (isSuperadmin && !previewAmbassadorId) {
-      renderSuperadminView(container, ambassadors);
+      renderSuperadminView(
+        container,
+        ambassadors
+      );
     } else {
       // Find current ambassador profile or previewed one
       let myProfile;
 
       if (previewAmbassadorId) {
         myProfile =
-          ambassadors.find(a => a.id === previewAmbassadorId) ||
+          ambassadors.find(
+            a => a.id === previewAmbassadorId
+          ) ||
           ambassadors[0];
       } else {
         myProfile =
@@ -129,16 +201,26 @@ export async function initEmbaixadoresModule(container) {
     amb,
     isSuperadminSimulating = false
   ) => {
-    const stores = amb.registeredStores || [];
-    const payouts = amb.payoutHistory || [];
+    const stores =
+      amb.registeredStores || [];
+
+    const payouts =
+      amb.payoutHistory || [];
+
     const activeStores =
-      stores.filter(s => s.paymentStatus === 'PAGO').length;
+      stores.filter(
+        s => s.paymentStatus === 'PAGO'
+      ).length;
 
     const pendingCommissions =
-      Number(amb.pendingCommissions || 0);
+      Number(
+        amb.pendingCommissions || 0
+      );
 
     const paidCommissions =
-      Number(amb.paidCommissions || 0);
+      Number(
+        amb.paidCommissions || 0
+      );
 
     const referralLink =
       getReferralLink(amb.code);
@@ -559,11 +641,12 @@ export async function initEmbaixadoresModule(container) {
       target.querySelector('#btn-copy-ref-link');
 
     if (copyButton) {
-
-      copyButton.onclick = () => {
+      copyButton.onclick = async () => {
 
         const link =
-          target.querySelector('#inp-ref-link')?.value;
+          target.querySelector(
+            '#inp-ref-link'
+          )?.value;
 
         if (!link) {
           showToast(
@@ -573,30 +656,18 @@ export async function initEmbaixadoresModule(container) {
           return;
         }
 
-        if (
-          navigator.clipboard &&
-          navigator.clipboard.writeText
-        ) {
+        const copied =
+          await copyTextToClipboard(link);
 
-          navigator.clipboard.writeText(link)
-            .then(() => {
-              showToast(
-                'Link de credenciamento copiado com sucesso!',
-                'success'
-              );
-            })
-            .catch(() => {
-              showToast(
-                'Link copiado: ' + link,
-                'info'
-              );
-            });
-
-        } else {
-
+        if (copied) {
           showToast(
-            'Link de credenciamento: ' + link,
-            'info'
+            'Link de credenciamento copiado com sucesso!',
+            'success'
+          );
+        } else {
+          showToast(
+            'Não foi possível copiar o link automaticamente. Selecione e copie o link manualmente.',
+            'error'
           );
         }
       };
@@ -629,7 +700,9 @@ export async function initEmbaixadoresModule(container) {
 
     // Form submit: Cadastrar Nova Loja
     const formNewStore =
-      target.querySelector('#form-add-referred-store');
+      target.querySelector(
+        '#form-add-referred-store'
+      );
 
     if (formNewStore) {
 
@@ -638,28 +711,45 @@ export async function initEmbaixadoresModule(container) {
         e.preventDefault();
 
         const name =
-          target.querySelector('#inp-ns-name').value.trim();
+          target.querySelector(
+            '#inp-ns-name'
+          ).value.trim();
 
         const ownerName =
-          target.querySelector('#inp-ns-owner').value.trim();
+          target.querySelector(
+            '#inp-ns-owner'
+          ).value.trim();
 
         const phone =
-          target.querySelector('#inp-ns-phone').value.trim();
+          target.querySelector(
+            '#inp-ns-phone'
+          ).value.trim();
 
         const city =
-          target.querySelector('#inp-ns-city').value.trim();
+          target.querySelector(
+            '#inp-ns-city'
+          ).value.trim();
 
         const monthlyFee =
           parseFloat(
-            target.querySelector('#sel-ns-plan').value
+            target.querySelector(
+              '#sel-ns-plan'
+            ).value
           ) || 3500;
 
         const contractDurationMonths =
           parseInt(
-            target.querySelector('#sel-ns-duration').value
+            target.querySelector(
+              '#sel-ns-duration'
+            ).value
           ) || 12;
 
-        if (!name || !ownerName || !phone || !city) {
+        if (
+          !name ||
+          !ownerName ||
+          !phone ||
+          !city
+        ) {
 
           showToast(
             'Por favor, preencha todos os campos obrigatórios da nova loja.',
@@ -670,11 +760,14 @@ export async function initEmbaixadoresModule(container) {
         }
 
         const saveButton =
-          target.querySelector('#btn-save-new-store');
+          target.querySelector(
+            '#btn-save-new-store'
+          );
 
         if (saveButton) {
           saveButton.disabled = true;
-          saveButton.textContent = 'A cadastrar...';
+          saveButton.textContent =
+            'A cadastrar...';
         }
 
         try {
@@ -689,8 +782,10 @@ export async function initEmbaixadoresModule(container) {
                 city,
                 monthlyFee,
                 contractDurationMonths,
-                commissionRate: amb.commissionRate,
-                paymentStatus: 'PAGO'
+                commissionRate:
+                  amb.commissionRate,
+                paymentStatus:
+                  'PAGO'
               }
             );
 
@@ -710,7 +805,8 @@ export async function initEmbaixadoresModule(container) {
 
           showToast(
             'Erro ao cadastrar loja: ' +
-            (err?.message || 'Erro desconhecido'),
+            (err?.message ||
+              'Erro desconhecido'),
             'error'
           );
 
@@ -747,7 +843,9 @@ export async function initEmbaixadoresModule(container) {
       ambassadors.reduce(
         (sum, a) =>
           sum +
-          Number(a.pendingCommissions || 0),
+          Number(
+            a.pendingCommissions || 0
+          ),
         0
       );
 
@@ -755,7 +853,9 @@ export async function initEmbaixadoresModule(container) {
       ambassadors.reduce(
         (sum, a) =>
           sum +
-          Number(a.paidCommissions || 0),
+          Number(
+            a.paidCommissions || 0
+          ),
         0
       );
 
@@ -887,10 +987,17 @@ export async function initEmbaixadoresModule(container) {
                       : (a.totalStores || 0);
 
                   const pending =
-                    Number(a.pendingCommissions || 0);
+                    Number(
+                      a.pendingCommissions || 0
+                    );
 
                   const paid =
-                    Number(a.paidCommissions || 0);
+                    Number(
+                      a.paidCommissions || 0
+                    );
+
+                  const referralLink =
+                    getReferralLink(a.code);
 
                   return `
                     <tr>
@@ -911,10 +1018,47 @@ export async function initEmbaixadoresModule(container) {
                         </div>
                       </td>
 
+                      <!-- LINK DE INDICAÇÃO -->
                       <td>
-                        <span style="font-family: var(--font-mono); font-weight: 800; color: #60a5fa; background: #1e293b; padding: 2px 6px; border-radius: 4px;">
-                          ${a.code}
-                        </span>
+                        <div style="display: flex; flex-direction: column; gap: 7px; min-width: 235px;">
+
+                          <span style="width: max-content; font-family: var(--font-mono); font-weight: 800; color: #60a5fa; background: #1e293b; padding: 2px 6px; border-radius: 4px;">
+                            ${a.code}
+                          </span>
+
+                          <input
+                            type="text"
+                            readonly
+                            value="${referralLink}"
+                            class="inp-super-ref-link"
+                            data-id="${a.id}"
+                            style="width: 100%; font-size: 10px; font-family: var(--font-mono); background: #020617; border-color: #334155; color: #93c5fd; padding: 5px 7px;"
+                          >
+
+                          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+
+                            <button
+                              class="btn btn-secondary btn-copy-super-ref-link"
+                              data-link="${referralLink}"
+                              type="button"
+                              style="padding: 5px 8px; font-size: 10px;"
+                            >
+                              Copiar Link
+                            </button>
+
+                            <button
+                              class="btn btn-secondary btn-open-super-ref-link"
+                              data-link="${referralLink}"
+                              type="button"
+                              style="padding: 5px 8px; font-size: 10px;"
+                              title="Abrir página pública de adesão"
+                            >
+                              Abrir Página
+                            </button>
+
+                          </div>
+
+                        </div>
                       </td>
 
                       <td>
@@ -990,7 +1134,9 @@ export async function initEmbaixadoresModule(container) {
 
     // Events
     const createButton =
-      target.querySelector('#btn-create-ambassador');
+      target.querySelector(
+        '#btn-create-ambassador'
+      );
 
     if (createButton) {
 
@@ -1000,6 +1146,70 @@ export async function initEmbaixadoresModule(container) {
         );
       };
     }
+
+    // Copiar link de indicação do Super Admin
+    target.querySelectorAll(
+      '.btn-copy-super-ref-link'
+    ).forEach(btn => {
+
+      btn.onclick = async () => {
+
+        const link =
+          btn.getAttribute('data-link');
+
+        if (!link) {
+          showToast(
+            'Link de credenciamento não disponível.',
+            'error'
+          );
+          return;
+        }
+
+        const copied =
+          await copyTextToClipboard(link);
+
+        if (copied) {
+
+          showToast(
+            'Link de credenciamento copiado com sucesso!',
+            'success'
+          );
+
+        } else {
+
+          showToast(
+            'Não foi possível copiar o link automaticamente. Copie o endereço exibido no campo.',
+            'error'
+          );
+        }
+      };
+    });
+
+    // Abrir página pública de adesão
+    target.querySelectorAll(
+      '.btn-open-super-ref-link'
+    ).forEach(btn => {
+
+      btn.onclick = () => {
+
+        const link =
+          btn.getAttribute('data-link');
+
+        if (!link) {
+          showToast(
+            'Link de credenciamento não disponível.',
+            'error'
+          );
+          return;
+        }
+
+        window.open(
+          link,
+          '_blank',
+          'noopener,noreferrer'
+        );
+      };
+    });
 
     // Payout modal
     target.querySelectorAll(
@@ -1012,7 +1222,9 @@ export async function initEmbaixadoresModule(container) {
           btn.getAttribute('data-id');
 
         const amb =
-          ambassadors.find(a => a.id === id);
+          ambassadors.find(
+            a => a.id === id
+          );
 
         if (amb) {
           openPayoutModal(
@@ -1053,7 +1265,9 @@ export async function initEmbaixadoresModule(container) {
       'modal-backdrop';
 
     const pendingAmount =
-      Number(amb.pendingCommissions || 0);
+      Number(
+        amb.pendingCommissions || 0
+      );
 
     modal.innerHTML = `
       <div class="modal-dialog" style="max-width: 460px; border-color: #10b981; box-shadow: 0 25px 50px -12px rgba(16, 185, 129, 0.3);">
@@ -1190,14 +1404,20 @@ export async function initEmbaixadoresModule(container) {
 
       const val =
         parseFloat(
-          modal.querySelector('#inp-po-val').value
+          modal.querySelector(
+            '#inp-po-val'
+          ).value
         ) || 0;
 
       const method =
-        modal.querySelector('#sel-po-method').value;
+        modal.querySelector(
+          '#sel-po-method'
+        ).value;
 
       const ref =
-        modal.querySelector('#inp-po-ref').value.trim() ||
+        modal.querySelector(
+          '#inp-po-ref'
+        ).value.trim() ||
         'MP-' +
         Math.floor(
           100000 +
@@ -1218,7 +1438,9 @@ export async function initEmbaixadoresModule(container) {
       }
 
       const confirmButton =
-        modal.querySelector('#btn-confirm-po');
+        modal.querySelector(
+          '#btn-confirm-po'
+        );
 
       confirmButton.disabled = true;
 
@@ -1254,7 +1476,8 @@ export async function initEmbaixadoresModule(container) {
 
         showToast(
           'Erro ao efetuar pagamento: ' +
-          (error?.message || 'Erro desconhecido'),
+          (error?.message ||
+            'Erro desconhecido'),
           'error'
         );
 
@@ -1265,7 +1488,9 @@ export async function initEmbaixadoresModule(container) {
       }
     };
 
-    document.body.appendChild(modal);
+    document.body.appendChild(
+      modal
+    );
   };
 
   // Create Ambassador Modal
@@ -1524,7 +1749,8 @@ export async function initEmbaixadoresModule(container) {
 
         showToast(
           'Erro ao cadastrar embaixador: ' +
-          (error?.message || 'Erro desconhecido'),
+          (error?.message ||
+            'Erro desconhecido'),
           'error'
         );
 
