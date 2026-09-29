@@ -1,1770 +1,2104 @@
 /**
- * GEF - GESTÃO FINANCEIRA | MÓDULO DE EMBAIXADORES & PARCEIROS
+ * GEF - GESTÃO FINANCEIRA | CORE DATABASE & BUSINESS ENGINE
  * JavaScript Puro (Vanilla JS)
- * Suporta visão do Embaixador (cadastro de novas lojas, tempo de comissão e extrato)
- * e do Superadmin (gestão global e liquidação com valor da comissão zerado).
+ *
+ * Supabase é a ÚNICA fonte de verdade. Nenhum dado é gravado em localStorage,
+ * nenhum dado fictício é gerado quando uma tabela está vazia.
+ * Operações críticas (venda, estorno, compra, transferência, perda,
+ * fechamento de caixa, inventário, pagamento de fiado) chamam RPCs atômicas
+ * no Postgres (ver supabase_schema_rls.sql) em vez de fazer múltiplos passos
+ * não-transacionais a partir do cliente.
  */
 
-import { db } from '../../js/core/database.js';
-import { auth } from '../../js/core/auth.js';
-import { showToast } from '../../js/components/toast.js';
-import { normalizeRole } from '../../js/core/permissions.js';
-
-export async function initEmbaixadoresModule(container) {
-  const currentUser = auth.getCurrentUser();
-  const userRole = currentUser ? normalizeRole(currentUser.role, currentUser.id) : 'EMBAIXADOR';
-  const isSuperadmin = userRole === 'SUPERADMIN';
-
-  // State to toggle between superadmin view and previewing an ambassador
-  let previewAmbassadorId = null;
-
-  /**
-   * Gera o endereço correto da página pública de adesão.
-   *
-   * Funciona em:
-   * - Cloudflare
-   * - Vercel
-   * - GitHub Pages
-   *
-   * Não fica preso ao domínio https://gef.co.mz.
-   */
-  const getReferralLink = (ambassadorCode) => {
-    const code = encodeURIComponent(ambassadorCode || '');
-
-    let basePath = '/';
-
-    try {
-      const pathname = window.location.pathname || '/';
-
-      // Se estiver em /repo/ ou /repo/index.html,
-      // preserva /repo/ para GitHub Pages.
-      if (pathname.endsWith('/')) {
-        basePath = pathname;
-      } else {
-        const lastSlash = pathname.lastIndexOf('/');
-
-        basePath = lastSlash >= 0
-          ? pathname.substring(0, lastSlash + 1)
-          : '/';
-      }
-
-      if (!basePath.startsWith('/')) {
-        basePath = '/' + basePath;
-      }
-
-    } catch (error) {
-      console.warn(
-        'Não foi possível determinar o caminho base:',
-        error
-      );
-
-      basePath = '/';
-    }
-
-    return `${window.location.origin}${basePath}adesao.html?embaixador=${code}`;
-  };
-
-  /**
-   * Copia texto para o clipboard.
-   * Usa Clipboard API quando disponível e fallback
-   * para navegadores onde ela não estiver disponível.
-   */
-  const copyTextToClipboard = async (text) => {
-    if (!text) {
-      return false;
-    }
-
-    try {
-      if (
-        navigator.clipboard &&
-        navigator.clipboard.writeText
-      ) {
-        await navigator.clipboard.writeText(text);
-        return true;
-      }
-    } catch (error) {
-      console.warn(
-        'Clipboard API indisponível. Tentando método alternativo:',
-        error
-      );
-    }
-
-    try {
-      const textarea =
-        document.createElement('textarea');
-
-      textarea.value = text;
-
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      textarea.style.top = '0';
-      textarea.style.opacity = '0';
-
-      document.body.appendChild(textarea);
-
-      textarea.focus();
-      textarea.select();
-      textarea.setSelectionRange(
-        0,
-        textarea.value.length
-      );
-
-      const copied =
-        document.execCommand('copy');
-
-      textarea.remove();
-
-      return copied;
-
-    } catch (error) {
-      console.error(
-        'Falha no método alternativo de cópia:',
-        error
-      );
-
-      return false;
-    }
-  };
-
-  const render = async () => {
-    // Role-based visibility enforcement
-    if (!isSuperadmin && userRole !== 'EMBAIXADOR') {
-      container.innerHTML = `
-        <div class="card" style="max-width: 600px; margin: 40px auto; text-align: center; padding: 36px 24px;">
-          <div style="width: 56px; height: 56px; border-radius: 50%; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); display: flex; align-items: center; justify-content: center; margin: 0 auto 16px auto; color: #f87171;">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          </div>
-          <h2 style="font-size: 18px; font-weight: 800; color: #f8fafc; margin: 0 0 8px 0;">Módulo de Acesso Restrito</h2>
-          <p style="font-size: 12px; color: #94a3b8; line-height: 1.6; margin: 0 0 20px 0;">
-            O Portal de Embaixadores é reservado exclusivamente a parceiros credenciados e à administração central da plataforma. O seu perfil atual (<strong>${userRole}</strong>) visualiza apenas as rotinas pertinentes à sua função.
-          </p>
-          <div style="font-size: 11px; color: #64748b;">
-            Utilize o menu lateral para acessar os módulos da sua loja.
-          </div>
-        </div>
-      `;
-      return;
-    }
-
-    const ambassadors = await db.getAmbassadors();
-
-    if (isSuperadmin && !previewAmbassadorId) {
-      renderSuperadminView(
-        container,
-        ambassadors
-      );
-    } else {
-      // Find current ambassador profile or previewed one
-      let myProfile;
-
-      if (previewAmbassadorId) {
-        myProfile =
-          ambassadors.find(
-            a => a.id === previewAmbassadorId
-          ) ||
-          ambassadors[0];
-      } else {
-        myProfile =
-          ambassadors.find(
-            a =>
-              a.id === currentUser?.id ||
-              a.email === currentUser?.email
-          ) ||
-          ambassadors[0];
-      }
-
-      if (!myProfile) {
-        container.innerHTML = `
-          <div class="card" style="max-width: 600px; margin: 40px auto; text-align: center; padding: 36px 24px;">
-            <h2 style="font-size: 18px; font-weight: 800; color: #f8fafc; margin: 0 0 8px 0;">
-              Perfil de Embaixador não encontrado
-            </h2>
-            <p style="font-size: 12px; color: #94a3b8; line-height: 1.6; margin: 0;">
-              Não foi encontrado um cadastro de embaixador associado ao utilizador atual.
-            </p>
-          </div>
-        `;
-        return;
-      }
-
-      renderAmbassadorPortal(
-        container,
-        myProfile,
-        isSuperadmin
-      );
-    }
-  };
-
-  // --- 1. VISÃO DO EMBAIXADOR (PORTAL DO PARCEIRO) ---
-  const renderAmbassadorPortal = (
-    target,
-    amb,
-    isSuperadminSimulating = false
-  ) => {
-    const stores =
-      amb.registeredStores || [];
-
-    const payouts =
-      amb.payoutHistory || [];
-
-    const activeStores =
-      stores.filter(
-        s => s.paymentStatus === 'PAGO'
-      ).length;
-
-    const pendingCommissions =
-      Number(
-        amb.pendingCommissions || 0
-      );
-
-    const paidCommissions =
-      Number(
-        amb.paidCommissions || 0
-      );
-
-    const referralLink =
-      getReferralLink(amb.code);
-
-    target.innerHTML = `
-      <div style="display: flex; flex-direction: column; gap: 16px;">
-        ${isSuperadminSimulating ? `
-          <!-- Bar when Super Admin is simulating ambassador view -->
-          <div class="card" style="background: rgba(234, 88, 12, 0.15); border: 1px solid #ea580c; display: flex; justify-content: space-between; align-items: center; padding: 10px 16px;">
-            <div style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: #fed7aa; font-weight: 700;">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ea580c" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
-              <span>Visualizando como Embaixador: <strong>${amb.name}</strong> (${amb.code})</span>
-            </div>
-            <button class="btn btn-secondary" id="btn-exit-preview" style="padding: 4px 10px; font-size: 11px;">
-              Voltar ao Painel Super Admin
-            </button>
-          </div>
-        ` : ''}
-
-        <!-- Header Card -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-            <div>
-              <div style="font-size: 11px; font-weight: 800; color: #3b82f6; text-transform: uppercase; letter-spacing: 0.5px;">
-                Programa Oficial de Embaixadores & Expansão SaaS GEF
-              </div>
-              <h2 style="font-size: 18px; font-weight: 900; color: #f8fafc; margin: 2px 0 0 0;">
-                Painel do Embaixador: ${amb.name}
-              </h2>
-              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                Cadastre novas lojas de ferragens e receba comissão recorrente durante toda a vigência do contrato.
-              </div>
-            </div>
-            <div style="display: flex; gap: 8px; align-items: center;">
-              <span class="badge badge-emerald">PARCEIRO CREDENCIADO</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Ambassador Credentials & Details Card -->
-        <div class="card" style="background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%); border-color: #3b82f6;">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
-            <div>
-              <div style="font-size: 11px; color: #93c5fd; font-weight: 700; text-transform: uppercase;">
-                Seu Código de Embaixador Oficial:
-              </div>
-              <div style="font-size: 24px; font-weight: 900; color: #ffffff; font-family: var(--font-mono); letter-spacing: 1px; margin: 4px 0;">
-                ${amb.code}
-              </div>
-              <div style="font-size: 11px; color: #cbd5e1;">
-                Taxa de comissão contratada: <strong style="color: #34d399;">${amb.commissionRate}%</strong> sobre a mensalidade de cada loja cadastrada.
-              </div>
-              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                Destino das liquidações: <strong style="color: #f8fafc;">${amb.paymentDetails || 'M-Pesa (+258 84 764 0849)'}</strong>
-              </div>
-            </div>
-
-            <div style="display: flex; flex-direction: column; gap: 6px;">
-              <div style="font-size: 11px; color: #94a3b8;">
-                Link de credenciamento do embaixador:
-              </div>
-
-              <div style="display: flex; gap: 8px;">
-                <input
-                  type="text"
-                  readonly
-                  value="${referralLink}"
-                  id="inp-ref-link"
-                  style="font-size: 11px; width: 280px; font-family: var(--font-mono); background: #020617; border-color: #334155; color: #93c5fd;"
-                >
-
-                <button
-                  class="btn btn-primary"
-                  id="btn-copy-ref-link"
-                  style="padding: 6px 14px; font-size: 11px;"
-                >
-                  Copiar Link
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Metrics Grid Cards -->
-        <div class="metrics-grid">
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">Lojas Cadastradas por Mim</div>
-            <div style="font-size: 24px; font-weight: 900; color: #f8fafc; font-family: var(--font-mono); margin-top: 4px;">
-              ${stores.length}
-            </div>
-            <div style="font-size: 10px; color: #64748b; margin-top: 2px;">Ferragens e depósitos angariados</div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">Lojas com Pagamento em Dia</div>
-            <div style="font-size: 24px; font-weight: 900; color: #34d399; font-family: var(--font-mono); margin-top: 4px;">
-              ${activeStores}
-            </div>
-            <div style="font-size: 10px; color: #10b981; margin-top: 2px;">Gerando comissões ativas</div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">Comissão a Receber (Saldo Disponível)</div>
-            <div style="font-size: 24px; font-weight: 900; color: ${pendingCommissions === 0 ? '#34d399' : '#fbbf24'}; font-family: var(--font-mono); margin-top: 4px;">
-              ${pendingCommissions.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 12px; color: ${pendingCommissions === 0 ? '#10b981' : '#f59e0b'};">MT</span>
-            </div>
-            <div style="font-size: 10px; color: ${pendingCommissions === 0 ? '#10b981' : '#f59e0b'}; margin-top: 2px;">
-              ${pendingCommissions === 0 ? '✓ Saldo ZERADO (Totalmente liquidado)' : 'Aguardando liquidação pelo Super Admin'}
-            </div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">Total de Comissões Já Recebidas</div>
-            <div style="font-size: 24px; font-weight: 900; color: #60a5fa; font-family: var(--font-mono); margin-top: 4px;">
-              ${paidCommissions.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 12px; color: #3b82f6;">MT</span>
-            </div>
-            <div style="font-size: 10px; color: #64748b; margin-top: 2px;">Já transferidas via M-Pesa / Banco</div>
-          </div>
-        </div>
-
-        <!-- FORM: Cadastro de Novas Lojas pelo Embaixador -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #1f2937; padding-bottom: 10px;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ea580c" stroke-width="2"><path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z"/><path d="M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2"/><path d="M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2"/></svg>
-              <h3 style="font-size: 15px; font-weight: 800; color: #f8fafc; margin: 0;">
-                Cadastrar Nova Loja Parceira
-              </h3>
-            </div>
-            <span style="font-size: 11px; color: #94a3b8;">Cadastre ferragens indicadas para começar a faturar</span>
-          </div>
-
-          <form id="form-add-referred-store" style="display: flex; flex-direction: column; gap: 14px;">
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px;">
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Nome da Loja / Ferragem: *</label>
-                <input type="text" id="inp-ns-name" placeholder="Ex: Ferragens Progresso da Beira, Lda" required style="width: 100%;">
-              </div>
-
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Nome do Proprietário / Responsável: *</label>
-                <input type="text" id="inp-ns-owner" placeholder="Ex: Armando Macamo" required style="width: 100%;">
-              </div>
-
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Telefone / WhatsApp do Proprietário: *</label>
-                <input type="text" id="inp-ns-phone" placeholder="+258 84 000 0000" required style="width: 100%;">
-              </div>
-
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Cidade / Província: *</label>
-                <input type="text" id="inp-ns-city" placeholder="Ex: Beira, Sofala" required style="width: 100%;">
-              </div>
-            </div>
-
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Plano da Mensalidade SaaS: *</label>
-                <select id="sel-ns-plan" style="width: 100%;">
-                  <option value="2500">Plano Básico – 2.500,00 MT/mês</option>
-                  <option value="3500" selected>Plano Profissional – 3.500,00 MT/mês</option>
-                  <option value="4500">Plano Empresarial – 4.500,00 MT/mês</option>
-                  <option value="6000">Plano Rede Multi-Lojas – 6.000,00 MT/mês</option>
-                </select>
-              </div>
-
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Tempo de Vigência da Comissão: *</label>
-                <select id="sel-ns-duration" style="width: 100%;">
-                  <option value="12" selected>12 Meses (1 Ano de comissão mensal)</option>
-                  <option value="24">24 Meses (2 Anos de comissão mensal)</option>
-                  <option value="36">36 Meses (3 Anos de comissão mensal)</option>
-                  <option value="999">Contrato Vitalício (Enquanto a loja pagar)</option>
-                </select>
-              </div>
-
-              <div>
-                <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">Sua Comissão Mensal Estimada:</label>
-                <div id="disp-calc-commission" style="font-size: 14px; font-weight: 800; color: #34d399; font-family: var(--font-mono); padding: 8px 12px; background: #0f172a; border-radius: 6px; border: 1px solid #334155;">
-                  525,00 MT / mês (${amb.commissionRate}%)
-                </div>
-              </div>
-
-              <div style="display: flex; align-items: flex-end;">
-                <button type="submit" class="btn btn-primary" id="btn-save-new-store" style="width: 100%; padding: 10px 16px; font-weight: 800; background: #10b981; border-color: #10b981;">
-                  + Cadastrar Nova Loja & Iniciar Comissão
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-
-        <!-- TABLE: Situação de Pagamento das Lojas e Tempo de Comissão -->
-        <div class="card" style="padding: 0; overflow: hidden;">
-          <div style="padding: 14px 16px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <div>
-              <h3 style="font-size: 14px; font-weight: 800; color: #f8fafc; margin: 0;">
-                Lojas Cadastradas por Mim, Situação de Pagamento & Tempo de Comissão
-              </h3>
-              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                Acompanhe o estado de pagamento de cada filial e a vigência temporal da sua comissão.
-              </div>
-            </div>
-            <span class="badge badge-blue">${stores.length} LOJAS REGISTRADAS</span>
-          </div>
-
-          <div style="overflow-x: auto;">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Loja / Ferragem</th>
-                  <th>Proprietário / Telefone</th>
-                  <th>Mensalidade (MT)</th>
-                  <th>Situação de Pagamento da Loja</th>
-                  <th>Quanto Tempo de Comissão</th>
-                  <th>Comissão Recebida (MT/mês)</th>
-                  <th>Total Gerado (MT)</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                ${stores.length === 0 ? `
-                  <tr>
-                    <td colspan="7" style="text-align: center; color: #64748b; padding: 28px;">
-                      Nenhuma loja cadastrada ainda. Utilize o formulário acima para registrar sua primeira loja indicada.
-                    </td>
-                  </tr>
-                ` : stores.map(s => {
-
-                  const isPaid =
-                    s.paymentStatus === 'PAGO';
-
-                  const isPending =
-                    s.paymentStatus === 'PENDENTE';
-
-                  const statusBadge = isPaid
-                    ? `<span class="badge badge-emerald">✓ PAGO / EM DIA</span>`
-                    : isPending
-                      ? `<span class="badge badge-amber">⏳ PENDENTE</span>`
-                      : `<span class="badge badge-red">✕ ATRASADO / BLOQUEADO</span>`;
-
-                  const monthlyFee =
-                    Number(s.monthlyFee || 3500);
-
-                  const monthlyCommission =
-                    Number(
-                      s.monthlyCommission ||
-                      (monthlyFee * Number(s.commissionRate || amb.commissionRate) / 100) ||
-                      0
-                    );
-
-                  const totalCommissionEarned =
-                    Number(
-                      s.totalCommissionEarned ||
-                      (
-                        monthlyCommission *
-                        Number(s.monthsActive || 1)
-                      ) ||
-                      0
-                    );
-
-                  return `
-                    <tr>
-                      <td>
-                        <div style="font-weight: 800; color: #f8fafc;">${s.name}</div>
-                        <div style="font-size: 11px; color: #94a3b8;">
-                          ${s.city || 'Maputo'} • Cadastrada em ${s.registeredAt ? s.registeredAt.split('T')[0] : '2026'}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div style="font-weight: 700; color: #cbd5e1;">
-                          ${s.ownerName || 'Responsável'}
-                        </div>
-                        <div style="font-size: 11px; font-family: var(--font-mono); color: #94a3b8;">
-                          ${s.phone || '+258 84 ...'}
-                        </div>
-                      </td>
-
-                      <td style="font-family: var(--font-mono); font-weight: 700; color: #f8fafc;">
-                        ${monthlyFee.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
-                      </td>
-
-                      <td>
-                        <div>${statusBadge}</div>
-
-                        <div style="font-size: 10px; color: #94a3b8; margin-top: 3px;">
-                          Último: ${s.lastPaymentDate || '01/09/2026'} |
-                          Prox: ${s.nextDueDate || '01/10/2026'}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div style="font-weight: 800; color: #60a5fa; font-size: 12px;">
-                          ${s.commissionDurationText || (s.contractDurationMonths ? `${s.contractDurationMonths} meses` : '12 meses')}
-                        </div>
-
-                        <div style="font-size: 10px; color: #94a3b8; margin-top: 2px;">
-                          ${s.monthsActive ? `Ativa há ${s.monthsActive} meses` : 'Vigência em andamento'}
-                        </div>
-                      </td>
-
-                      <td>
-                        <strong style="color: #34d399; font-family: var(--font-mono); font-size: 13px;">
-                          +${monthlyCommission.toFixed(2)} MT/mês
-                        </strong>
-
-                        <div style="font-size: 10px; color: #94a3b8;">
-                          Taxa: ${s.commissionRate || amb.commissionRate}%
-                        </div>
-                      </td>
-
-                      <td style="font-family: var(--font-mono); font-weight: 800; color: #f8fafc;">
-                        ${totalCommissionEarned.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} MT
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        <!-- TABLE: Extrato de Pagamentos Realizados pelo Super Admin -->
-        <div class="card" style="padding: 0; overflow: hidden;">
-          <div style="padding: 14px 16px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <h3 style="font-size: 14px; font-weight: 800; color: #f8fafc; margin: 0;">
-                Extrato de Comissões Pagas pelo Super Administrador
-              </h3>
-
-              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                Histórico de transferências liquidadas e comprovantes gerados pelo Super Admin.
-              </div>
-            </div>
-
-            <span class="badge badge-emerald">
-              ${payouts.length} LIQUIDAÇÕES
-            </span>
-          </div>
-
-          <div style="overflow-x: auto;">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>Nº da Liquidação</th>
-                  <th>Data & Hora</th>
-                  <th>Valor Pago</th>
-                  <th>Forma de Transferência</th>
-                  <th>Recibo / Comprovante</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-
-              <tbody>
-                ${payouts.length === 0 ? `
-                  <tr>
-                    <td colspan="6" style="text-align: center; color: #64748b; padding: 24px;">
-                      Nenhuma liquidação registrada ainda.
-                    </td>
-                  </tr>
-                ` : payouts.map(p => {
-
-                  const amount =
-                    Number(p.amount || 0);
-
-                  return `
-                    <tr>
-                      <td>
-                        <strong>${p.id}</strong>
-                      </td>
-
-                      <td style="font-size: 11px; color: #cbd5e1;">
-                        ${p.date}
-                      </td>
-
-                      <td style="color: #34d399; font-weight: 900; font-family: var(--font-mono); font-size: 13px;">
-                        ${amount.toFixed(2)} MT
-                      </td>
-
-                      <td>
-                        ${p.method || ''}
-                      </td>
-
-                      <td>
-                        <span style="font-family: var(--font-mono); color: #cbd5e1; background: #0f172a; padding: 2px 6px; border-radius: 4px; font-size: 11px;">
-                          ${p.receipt || ''}
-                        </span>
-                      </td>
-
-                      <td>
-                        <span class="badge badge-emerald">
-                          ${p.status || 'LIQUIDADO'}
-                        </span>
-                      </td>
-                    </tr>
-                  `;
-                }).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Events
-    const btnExit =
-      target.querySelector('#btn-exit-preview');
-
-    if (btnExit) {
-      btnExit.onclick = () => {
-        previewAmbassadorId = null;
-        render();
-      };
-    }
-
-    const copyButton =
-      target.querySelector('#btn-copy-ref-link');
-
-    if (copyButton) {
-      copyButton.onclick = async () => {
-
-        const link =
-          target.querySelector(
-            '#inp-ref-link'
-          )?.value;
-
-        if (!link) {
-          showToast(
-            'Não foi possível obter o link de credenciamento.',
-            'error'
-          );
-          return;
-        }
-
-        const copied =
-          await copyTextToClipboard(link);
-
-        if (copied) {
-          showToast(
-            'Link de credenciamento copiado com sucesso!',
-            'success'
-          );
-        } else {
-          showToast(
-            'Não foi possível copiar o link automaticamente. Selecione e copie o link manualmente.',
-            'error'
-          );
-        }
-      };
-    }
-
-    // Calculate commission display on plan change
-    const selPlan =
-      target.querySelector('#sel-ns-plan');
-
-    const dispCalc =
-      target.querySelector('#disp-calc-commission');
-
-    if (selPlan && dispCalc) {
-
-      selPlan.onchange = () => {
-
-        const fee =
-          parseFloat(selPlan.value) || 3500;
-
-        const rate =
-          Number(amb.commissionRate || 0);
-
-        const comm =
-          (fee * rate) / 100;
-
-        dispCalc.textContent =
-          `${comm.toFixed(2)} MT / mês (${rate}%)`;
-      };
-    }
-
-    // Form submit: Cadastrar Nova Loja
-    const formNewStore =
-      target.querySelector(
-        '#form-add-referred-store'
-      );
-
-    if (formNewStore) {
-
-      formNewStore.onsubmit = async (e) => {
-
-        e.preventDefault();
-
-        const name =
-          target.querySelector(
-            '#inp-ns-name'
-          ).value.trim();
-
-        const ownerName =
-          target.querySelector(
-            '#inp-ns-owner'
-          ).value.trim();
-
-        const phone =
-          target.querySelector(
-            '#inp-ns-phone'
-          ).value.trim();
-
-        const city =
-          target.querySelector(
-            '#inp-ns-city'
-          ).value.trim();
-
-        const monthlyFee =
-          parseFloat(
-            target.querySelector(
-              '#sel-ns-plan'
-            ).value
-          ) || 3500;
-
-        const contractDurationMonths =
-          parseInt(
-            target.querySelector(
-              '#sel-ns-duration'
-            ).value
-          ) || 12;
-
-        if (
-          !name ||
-          !ownerName ||
-          !phone ||
-          !city
-        ) {
-
-          showToast(
-            'Por favor, preencha todos os campos obrigatórios da nova loja.',
-            'error'
-          );
-
-          return;
-        }
-
-        const saveButton =
-          target.querySelector(
-            '#btn-save-new-store'
-          );
-
-        if (saveButton) {
-          saveButton.disabled = true;
-          saveButton.textContent =
-            'A cadastrar...';
-        }
-
-        try {
-
-          const newStore =
-            await db.addAmbassadorReferredStore(
-              amb.id,
-              {
-                name,
-                ownerName,
-                phone,
-                city,
-                monthlyFee,
-                contractDurationMonths,
-                commissionRate:
-                  amb.commissionRate,
-                paymentStatus:
-                  'PAGO'
-              }
-            );
-
-          showToast(
-            `Loja ${name} cadastrada com sucesso! Comissão inicial adicionada ao seu saldo.`,
-            'success'
-          );
-
-          await render();
-
-        } catch (err) {
-
-          console.error(
-            'Erro ao cadastrar loja indicada:',
-            err
-          );
-
-          showToast(
-            'Erro ao cadastrar loja: ' +
-            (err?.message ||
-              'Erro desconhecido'),
-            'error'
-          );
-
-          if (saveButton) {
-            saveButton.disabled = false;
-            saveButton.textContent =
-              '+ Cadastrar Nova Loja & Iniciar Comissão';
-          }
-        }
-      };
-    }
-  };
-
-  // --- 2. VISÃO DO SUPERADMIN (GESTÃO DE EMBAIXADORES & LIQUIDAÇÃO DE COMISSÕES) ---
-  const renderSuperadminView = (
-    target,
-    ambassadors
-  ) => {
-
-    const totalAmbassadors =
-      ambassadors.length;
-
-    const totalStoresReferred =
-      ambassadors.reduce(
-        (sum, a) =>
-          sum +
-          (a.registeredStores
-            ? a.registeredStores.length
-            : 0),
-        0
-      );
-
-    const totalCommissionsPending =
-      ambassadors.reduce(
-        (sum, a) =>
-          sum +
-          Number(
-            a.pendingCommissions || 0
-          ),
-        0
-      );
-
-    const totalCommissionsPaid =
-      ambassadors.reduce(
-        (sum, a) =>
-          sum +
-          Number(
-            a.paidCommissions || 0
-          ),
-        0
-      );
-
-    target.innerHTML = `
-      <div style="display: flex; flex-direction: column; gap: 16px;">
-        <!-- Header Card -->
-        <div class="card">
-          <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-            <div>
-              <div style="font-size: 11px; font-weight: 800; color: #ea580c; text-transform: uppercase; letter-spacing: 0.5px;">
-                Governança Global SaaS • Superadmin Independente
-              </div>
-
-              <h2 style="font-size: 18px; font-weight: 900; color: #f8fafc; margin: 2px 0 0 0;">
-                Gestão Estratégica de Embaixadores & Liquidação de Comissões
-              </h2>
-
-              <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-                Cadastre parceiros, acompanhe lojas angariadas e efetue liquidações de comissões via M-Pesa / e-Mola / Banco.
-              </div>
-            </div>
-
-            <div style="display: flex; gap: 8px;">
-              <button class="btn btn-primary" id="btn-create-ambassador">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" x2="19" y1="8" y2="14"/><line x1="22" x2="16" y1="11" y2="11"/></svg>
-                <span>+ Novo Embaixador</span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Metrics Grid in Cards -->
-        <div class="metrics-grid">
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">
-              Embaixadores Cadastrados
-            </div>
-
-            <div style="font-size: 24px; font-weight: 900; color: #f8fafc; font-family: var(--font-mono); margin-top: 4px;">
-              ${totalAmbassadors}
-            </div>
-
-            <div style="font-size: 10px; color: #64748b; margin-top: 2px;">
-              Parceiros comerciais ativos
-            </div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">
-              Total de Lojas Angariadas
-            </div>
-
-            <div style="font-size: 24px; font-weight: 900; color: #60a5fa; font-family: var(--font-mono); margin-top: 4px;">
-              ${totalStoresReferred}
-            </div>
-
-            <div style="font-size: 10px; color: #64748b; margin-top: 2px;">
-              Novas filiais contratadas via embaixadores
-            </div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">
-              Comissões Pendentes a Pagar
-            </div>
-
-            <div style="font-size: 24px; font-weight: 900; color: #fbbf24; font-family: var(--font-mono); margin-top: 4px;">
-              ${totalCommissionsPending.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 12px; color: #f59e0b;">MT</span>
-            </div>
-
-            <div style="font-size: 10px; color: #f59e0b; margin-top: 2px;">
-              Aguardando clique de "Efetuar Pagamento"
-            </div>
-          </div>
-
-          <div class="card">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: 700; text-transform: uppercase;">
-              Comissões Já Liquidadas
-            </div>
-
-            <div style="font-size: 24px; font-weight: 900; color: #34d399; font-family: var(--font-mono); margin-top: 4px;">
-              ${totalCommissionsPaid.toLocaleString('pt-MZ', { minimumFractionDigits: 2 })} <span style="font-size: 12px; color: #10b981;">MT</span>
-            </div>
-
-            <div style="font-size: 10px; color: #64748b; margin-top: 2px;">
-              Valores já pagos e zerados
-            </div>
-          </div>
-
-        </div>
-
-        <!-- Ambassadors Management Table Card -->
-        <div class="card" style="padding: 0; overflow: hidden;">
-
-          <div style="padding: 14px 16px; border-bottom: 1px solid #1f2937; display: flex; justify-content: space-between; align-items: center;">
-            <h3 style="font-size: 14px; font-weight: 800; color: #f8fafc; margin: 0;">
-              Embaixadores, Lojas Cadastradas & Liquidação de Comissões
-            </h3>
-
-            <span style="font-size: 11px; color: #94a3b8;">
-              Clique em "Efetuar Pagamento" para zerar a comissão do embaixador
-            </span>
-          </div>
-
-          <div style="overflow-x: auto;">
-            <table class="data-table">
-
-              <thead>
-                <tr>
-                  <th>Embaixador</th>
-                  <th>Dados de Pagamento</th>
-                  <th>Código de Indicação</th>
-                  <th>Lojas Cadastradas</th>
-                  <th>Taxa (%)</th>
-                  <th>Comissão Pendente (Saldo)</th>
-                  <th>Total Já Pago</th>
-                  <th style="text-align: right;">Ações do Super Admin</th>
-                </tr>
-              </thead>
-
-              <tbody>
-
-                ${ambassadors.map(a => {
-
-                  const storesCount =
-                    a.registeredStores
-                      ? a.registeredStores.length
-                      : (a.totalStores || 0);
-
-                  const pending =
-                    Number(
-                      a.pendingCommissions || 0
-                    );
-
-                  const paid =
-                    Number(
-                      a.paidCommissions || 0
-                    );
-
-                  const referralLink =
-                    getReferralLink(a.code);
-
-                  return `
-                    <tr>
-
-                      <td>
-                        <div style="font-weight: 800; color: #f8fafc;">
-                          ${a.name}
-                        </div>
-
-                        <div style="font-size: 11px; color: #94a3b8;">
-                          ${a.phone} • ${a.email || ''}
-                        </div>
-                      </td>
-
-                      <td>
-                        <div style="font-size: 11px; color: #34d399; font-weight: 700;">
-                          ${a.paymentDetails || 'M-Pesa'}
-                        </div>
-                      </td>
-
-                      <!-- LINK DE INDICAÇÃO -->
-                      <td>
-                        <div style="display: flex; flex-direction: column; gap: 7px; min-width: 235px;">
-
-                          <span style="width: max-content; font-family: var(--font-mono); font-weight: 800; color: #60a5fa; background: #1e293b; padding: 2px 6px; border-radius: 4px;">
-                            ${a.code}
-                          </span>
-
-                          <input
-                            type="text"
-                            readonly
-                            value="${referralLink}"
-                            class="inp-super-ref-link"
-                            data-id="${a.id}"
-                            style="width: 100%; font-size: 10px; font-family: var(--font-mono); background: #020617; border-color: #334155; color: #93c5fd; padding: 5px 7px;"
-                          >
-
-                          <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-
-                            <button
-                              class="btn btn-secondary btn-copy-super-ref-link"
-                              data-link="${referralLink}"
-                              type="button"
-                              style="padding: 5px 8px; font-size: 10px;"
-                            >
-                              Copiar Link
-                            </button>
-
-                            <button
-                              class="btn btn-secondary btn-open-super-ref-link"
-                              data-link="${referralLink}"
-                              type="button"
-                              style="padding: 5px 8px; font-size: 10px;"
-                              title="Abrir página pública de adesão"
-                            >
-                              Abrir Página
-                            </button>
-
-                          </div>
-
-                        </div>
-                      </td>
-
-                      <td>
-                        <strong style="color: #f8fafc;">
-                          ${storesCount} lojas
-                        </strong>
-
-                        <div style="font-size: 10px; color: #94a3b8;">
-                          ${(a.registeredStores || []).filter(
-                            s => s.paymentStatus === 'PAGO'
-                          ).length} ativas/em dia
-                        </div>
-                      </td>
-
-                      <td style="font-family: var(--font-mono); font-weight: 700;">
-                        ${a.commissionRate}%
-                      </td>
-
-                      <td>
-                        <strong style="color: ${pending > 0 ? '#fbbf24' : '#34d399'}; font-family: var(--font-mono); font-size: 14px;">
-                          ${pending.toFixed(2)} MT
-                        </strong>
-
-                        <div style="font-size: 10px; color: ${pending > 0 ? '#f59e0b' : '#10b981'};">
-                          ${pending === 0 ? '✓ ZERADO (Em dia)' : 'Pendente de liquidação'}
-                        </div>
-                      </td>
-
-                      <td style="font-family: var(--font-mono); color: #cbd5e1; font-weight: 700;">
-                        ${paid.toFixed(2)} MT
-                      </td>
-
-                      <td style="text-align: right;">
-                        <div style="display: flex; gap: 6px; justify-content: flex-end; align-items: center;">
-
-                          ${pending > 0 ? `
-                            <button
-                              class="btn btn-primary btn-payout-amb"
-                              data-id="${a.id}"
-                              style="padding: 5px 10px; font-size: 11px; background: #10b981; border-color: #10b981; font-weight: 800;"
-                            >
-                              Efetuar Pagamento
-                            </button>
-                          ` : `
-                            <span class="badge badge-emerald" style="font-size: 9px; padding: 4px 8px;">
-                              COMISSÃO ZERADA
-                            </span>
-                          `}
-
-                          <button
-                            class="btn btn-secondary btn-simulate-amb"
-                            data-id="${a.id}"
-                            style="padding: 5px 8px; font-size: 11px;"
-                            title="Ver Portal do Embaixador"
-                          >
-                            Simular Visão
-                          </button>
-
-                        </div>
-                      </td>
-
-                    </tr>
-                  `;
-
-                }).join('')}
-
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    `;
-
-    // Events
-    const createButton =
-      target.querySelector(
-        '#btn-create-ambassador'
-      );
-
-    if (createButton) {
-
-      createButton.onclick = () => {
-        openCreateAmbassadorModal(
-          () => render()
-        );
-      };
-    }
-
-    // Copiar link de indicação do Super Admin
-    target.querySelectorAll(
-      '.btn-copy-super-ref-link'
-    ).forEach(btn => {
-
-      btn.onclick = async () => {
-
-        const link =
-          btn.getAttribute('data-link');
-
-        if (!link) {
-          showToast(
-            'Link de credenciamento não disponível.',
-            'error'
-          );
-          return;
-        }
-
-        const copied =
-          await copyTextToClipboard(link);
-
-        if (copied) {
-
-          showToast(
-            'Link de credenciamento copiado com sucesso!',
-            'success'
-          );
-
-        } else {
-
-          showToast(
-            'Não foi possível copiar o link automaticamente. Copie o endereço exibido no campo.',
-            'error'
-          );
-        }
-      };
-    });
-
-    // Abrir página pública de adesão
-    target.querySelectorAll(
-      '.btn-open-super-ref-link'
-    ).forEach(btn => {
-
-      btn.onclick = () => {
-
-        const link =
-          btn.getAttribute('data-link');
-
-        if (!link) {
-          showToast(
-            'Link de credenciamento não disponível.',
-            'error'
-          );
-          return;
-        }
-
-        window.open(
-          link,
-          '_blank',
-          'noopener,noreferrer'
-        );
-      };
-    });
-
-    // Payout modal
-    target.querySelectorAll(
-      '.btn-payout-amb'
-    ).forEach(btn => {
-
-      btn.onclick = () => {
-
-        const id =
-          btn.getAttribute('data-id');
-
-        const amb =
-          ambassadors.find(
-            a => a.id === id
-          );
-
-        if (amb) {
-          openPayoutModal(
-            amb,
-            () => render()
-          );
-        }
-      };
-    });
-
-    // Simulate view
-    target.querySelectorAll(
-      '.btn-simulate-amb'
-    ).forEach(btn => {
-
-      btn.onclick = () => {
-
-        const id =
-          btn.getAttribute('data-id');
-
-        previewAmbassadorId = id;
-
-        render();
-      };
-    });
-  };
-
-  // Payout Modal: O valor da comissão deve ser ZERADO quando o role super administrador clicar em efetuar pagamento
-  const openPayoutModal = (
-    amb,
-    onSuccess
-  ) => {
-
-    const modal =
-      document.createElement('div');
-
-    modal.className =
-      'modal-backdrop';
-
-    const pendingAmount =
-      Number(
-        amb.pendingCommissions || 0
-      );
-
-    modal.innerHTML = `
-      <div class="modal-dialog" style="max-width: 460px; border-color: #10b981; box-shadow: 0 25px 50px -12px rgba(16, 185, 129, 0.3);">
-
-        <div class="modal-header" style="background: rgba(16, 185, 129, 0.12); border-bottom-color: rgba(16, 185, 129, 0.3);">
-
-          <div style="display: flex; align-items: center; gap: 8px;">
-
-            <div style="width: 28px; height: 28px; border-radius: 6px; background: rgba(16, 185, 129, 0.2); display: flex; align-items: center; justify-content: center;">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2"><line x1="12" x2="12" y1="2" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-            </div>
-
-            <h3 class="modal-title" style="color: #6ee7b7; font-size: 15px;">
-              Liquidar Comissão de Embaixador
-            </h3>
-
-          </div>
-
-          <button class="modal-close-btn" id="btn-close-pomodal">
-            ✕
-          </button>
-
-        </div>
-
-        <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 14px;">
-
-          <div class="card" style="padding: 12px; background: #1e293b; border-color: #334155;">
-
-            <div style="font-size: 14px; font-weight: 800; color: #fff;">
-              ${amb.name}
-            </div>
-
-            <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-              Código:
-              <strong style="color: #60a5fa;">
-                ${amb.code}
-              </strong>
-            </div>
-
-            <div style="font-size: 11px; color: #94a3b8; margin-top: 4px;">
-              Saldo Pendente a Liquidar:
-              <strong style="color: #fbbf24; font-size: 14px; font-family: var(--font-mono);">
-                ${pendingAmount.toFixed(2)} MT
-              </strong>
-            </div>
-
-            <div style="font-size: 11px; color: #94a3b8; margin-top: 2px;">
-              Destino Cadastrado:
-              <strong style="color: #34d399;">
-                ${amb.paymentDetails || 'M-Pesa (+258 84 764 0849)'}
-              </strong>
-            </div>
-
-          </div>
-
-          <div style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); padding: 10px; border-radius: 6px; font-size: 11px; color: #a7f3d0; line-height: 1.4;">
-            <strong>Regra de Pagamento:</strong>
-            Ao confirmar esta liquidação,
-            <strong>o valor da comissão deste embaixador será ZERADO (0,00 MT)</strong>
-            e registrado no extrato do parceiro.
-          </div>
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Valor a Liquidar (MT):
-            </label>
-
-            <input
-              type="number"
-              min="1"
-              max="${pendingAmount}"
-              step="any"
-              id="inp-po-val"
-              value="${pendingAmount}"
-              style="width: 100%; font-size: 18px; font-weight: 900; font-family: var(--font-mono); color: #34d399;"
-            >
-          </div>
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Meio de Liquidação:
-            </label>
-
-            <select id="sel-po-method" style="width: 100%;">
-              <option value="M-Pesa (Vodacom)">M-Pesa (Vodacom +258 84 764 0849)</option>
-              <option value="e-Mola (Movitel)">e-Mola / Esmola (+258 87 309 1444)</option>
-              <option value="Millennium bim (Conta 863896066)">Millennium bim (Conta 863896066)</option>
-              <option value="Transferência Bancária (BCI/Standard)">Transferência Bancária</option>
-              <option value="Dinheiro Físico">Dinheiro Físico</option>
-            </select>
-          </div>
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Nº de Transação / Comprovante:
-            </label>
-
-            <input
-              type="text"
-              id="inp-po-ref"
-              placeholder="Ex: MP260910.8841.B09"
-              style="width: 100%; font-family: var(--font-mono);"
-            >
-          </div>
-
-        </div>
-
-        <div class="modal-footer" style="display: flex; justify-content: space-between; align-items: center;">
-
-          <button class="btn btn-secondary" id="btn-cancel-pomodal">
-            Cancelar
-          </button>
-
-          <button class="btn btn-primary" id="btn-confirm-po" style="background: #10b981; border-color: #10b981; font-weight: 800; padding: 8px 16px;">
-            Confirmar Pagamento & Zerar Saldo
-          </button>
-
-        </div>
-
-      </div>
-    `;
-
-    modal.querySelector(
-      '#btn-close-pomodal'
-    ).onclick = () => modal.remove();
-
-    modal.querySelector(
-      '#btn-cancel-pomodal'
-    ).onclick = () => modal.remove();
-
-    modal.querySelector(
-      '#btn-confirm-po'
-    ).onclick = async () => {
-
-      const val =
-        parseFloat(
-          modal.querySelector(
-            '#inp-po-val'
-          ).value
-        ) || 0;
-
-      const method =
-        modal.querySelector(
-          '#sel-po-method'
-        ).value;
-
-      const ref =
-        modal.querySelector(
-          '#inp-po-ref'
-        ).value.trim() ||
-        'MP-' +
-        Math.floor(
-          100000 +
-          Math.random() * 900000
-        );
-
-      if (
-        val <= 0 ||
-        val > pendingAmount
-      ) {
-
-        showToast(
-          'Valor de pagamento inválido.',
-          'error'
-        );
-
-        return;
-      }
-
-      const confirmButton =
-        modal.querySelector(
-          '#btn-confirm-po'
-        );
-
-      confirmButton.disabled = true;
-
-      confirmButton.textContent =
-        'A processar...';
-
-      try {
-
-        await db.payAmbassadorCommission(
-          amb.id,
-          val,
-          method,
-          ref
-        );
-
-        showToast(
-          `Pagamento de ${val.toFixed(2)} MT efetuado com sucesso! A comissão de ${amb.name} foi ZERADA.`,
-          'success'
-        );
-
-        modal.remove();
-
-        if (onSuccess) {
-          onSuccess();
-        }
-
-      } catch (error) {
-
-        console.error(
-          'Erro ao efetuar pagamento:',
-          error
-        );
-
-        showToast(
-          'Erro ao efetuar pagamento: ' +
-          (error?.message ||
-            'Erro desconhecido'),
-          'error'
-        );
-
-        confirmButton.disabled = false;
-
-        confirmButton.textContent =
-          'Confirmar Pagamento & Zerar Saldo';
-      }
-    };
-
-    document.body.appendChild(
-      modal
-    );
-  };
-
-  // Create Ambassador Modal
-  const openCreateAmbassadorModal = (
-    onSuccess
-  ) => {
-
-    const modal =
-      document.createElement('div');
-
-    modal.className =
-      'modal-backdrop';
-
-    modal.innerHTML = `
-      <div class="modal-dialog" style="max-width: 460px;">
-
-        <div class="modal-header">
-
-          <h3 class="modal-title">
-            Cadastrar Novo Embaixador Parceiro
-          </h3>
-
-          <button class="modal-close-btn" id="btn-close-camodal">
-            ✕
-          </button>
-
-        </div>
-
-        <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Nome Completo do Parceiro: *
-            </label>
-
-            <input
-              type="text"
-              id="inp-ca-name"
-              placeholder="Ex: Eng. Bernardo Cossa"
-              required
-              style="width: 100%;"
-            >
-          </div>
-
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-
-            <div>
-              <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-                Telefone / WhatsApp: *
-              </label>
-
-              <input
-                type="text"
-                id="inp-ca-phone"
-                placeholder="+258 84 000 0000"
-                style="width: 100%;"
-              >
-            </div>
-
-            <div>
-              <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-                Taxa Comissão (%): *
-              </label>
-
-              <input
-                type="number"
-                id="inp-ca-rate"
-                value="15.0"
-                step="1"
-                min="1"
-                max="50"
-                style="width: 100%;"
-              >
-            </div>
-
-          </div>
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Email Corporativo:
-            </label>
-
-            <input
-              type="email"
-              id="inp-ca-email"
-              placeholder="parceiro@exemplo.co.mz"
-              style="width: 100%;"
-            >
-          </div>
-
-          <div>
-            <label style="font-size: 11px; font-weight: 700; color: #cbd5e1; display: block; margin-bottom: 4px;">
-              Dados para Pagamento M-Pesa / Banco:
-            </label>
-
-            <input
-              type="text"
-              id="inp-ca-paydetails"
-              placeholder="Ex: M-Pesa +258 84 123 4567 ou Millennium bim"
-              style="width: 100%;"
-            >
-          </div>
-
-        </div>
-
-        <div class="modal-footer">
-
-          <button class="btn btn-secondary" id="btn-cancel-camodal">
-            Cancelar
-          </button>
-
-          <button class="btn btn-primary" id="btn-save-amb">
-            Cadastrar Embaixador
-          </button>
-
-        </div>
-
-      </div>
-    `;
-
-    modal.querySelector(
-      '#btn-close-camodal'
-    ).onclick = () => modal.remove();
-
-    modal.querySelector(
-      '#btn-cancel-camodal'
-    ).onclick = () => modal.remove();
-
-    modal.querySelector(
-      '#btn-save-amb'
-    ).onclick = async () => {
-
-      const name =
-        modal.querySelector(
-          '#inp-ca-name'
-        ).value.trim();
-
-      const phone =
-        modal.querySelector(
-          '#inp-ca-phone'
-        ).value.trim();
-
-      const email =
-        modal.querySelector(
-          '#inp-ca-email'
-        ).value.trim();
-
-      const rate =
-        parseFloat(
-          modal.querySelector(
-            '#inp-ca-rate'
-          ).value
-        ) || 15.0;
-
-      const payDetails =
-        modal.querySelector(
-          '#inp-ca-paydetails'
-        ).value.trim();
-
-      if (!name) {
-
-        showToast(
-          'Nome do embaixador é obrigatório.',
-          'error'
-        );
-
-        return;
-      }
-
-      const slug =
-        name
-          .split(' ')[0]
-          .toUpperCase();
-
-      const newAmb = {
-
-        id:
-          'amb-' +
-          Date.now(),
-
-        name,
-
-        email:
-          email ||
-          `${slug.toLowerCase()}@gefparceiros.co.mz`,
-
-        phone:
-          phone ||
-          '+258 84 000 0000',
-
-        code:
-          `GEF-${slug}-${new Date().getFullYear()}`,
-
-        commissionRate:
-          rate,
-
-        status:
-          'ATIVO',
-
-        totalStores:
-          0,
-
-        activeStores:
-          0,
-
-        pendingCommissions:
-          0,
-
-        paidCommissions:
-          0,
-
-        paymentDetails:
-          payDetails ||
-          `M-Pesa: ${phone}`,
-
-        registeredStores:
-          [],
-
-        payoutHistory:
-          []
-      };
-
-      const saveButton =
-        modal.querySelector(
-          '#btn-save-amb'
-        );
-
-      saveButton.disabled = true;
-
-      saveButton.textContent =
-        'A cadastrar...';
-
-      try {
-
-        await db.saveAmbassador(
-          newAmb
-        );
-
-        showToast(
-          `Embaixador ${name} cadastrado com o código ${newAmb.code}!`,
-          'success'
-        );
-
-        modal.remove();
-
-        if (onSuccess) {
-          onSuccess();
-        }
-
-      } catch (error) {
-
-        console.error(
-          'Erro ao cadastrar embaixador:',
-          error
-        );
-
-        showToast(
-          'Erro ao cadastrar embaixador: ' +
-          (error?.message ||
-            'Erro desconhecido'),
-          'error'
-        );
-
-        saveButton.disabled = false;
-
-        saveButton.textContent =
-          'Cadastrar Embaixador';
-      }
-    };
-
-    document.body.appendChild(
-      modal
-    );
-  };
-
-  await render();
+import { i18n } from './i18n.js';
+import { supabase, isSupabaseConfigured } from './supabase.js';
+
+function requireClient() {
+  if (!supabase || !isSupabaseConfigured()) {
+    throw new Error('Supabase não configurado. Defina SUPABASE_URL/SUPABASE_ANON_KEY em js/config.js.');
+  }
+  return supabase;
 }
+
+function unwrap({ data, error }, fallback) {
+  if (error) throw new Error(error.message || 'Erro ao consultar o Supabase.');
+  return data ?? fallback;
+}
+
+function normalizeRole(role) {
+  return String(role || '').trim().toUpperCase();
+}
+
+// --- Mapeamento snake_case (banco) <-> camelCase (usado pelos módulos) ---
+
+function productFromRow(row, batches = [], packages = []) {
+  const stockByLocation = {
+    LOJA: Number(row.stock_loja || 0),
+    ARMAZEM: Number(row.stock_armazem || 0),
+    PATIO: Number(row.stock_patio || 0)
+  };
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    code: row.code,
+    barcode: row.barcode,
+    name: row.name,
+    category: row.category,
+    baseUnit: row.unit,
+    costPriceBase: Number(row.cost_price || 0),
+    salePriceBase: Number(row.sale_price || 0),
+    wholesalePrice: row.wholesale_price != null ? Number(row.wholesale_price) : null,
+    minStockBase: Number(row.min_stock ?? 10),
+    minStockAlert: Number(row.min_stock ?? 10),
+    currentStockBase: Number(row.current_stock || 0),
+    stockByLocation,
+    isFractional: !!row.is_fractional,
+    active: row.active !== false,
+    batches: batches.filter(b => b.productId === row.id),
+    conversions: packages.filter(p => p.productId === row.id)
+  };
+}
+
+function batchFromRow(row) {
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    productId: row.product_id,
+    batchNumber: row.batch_number,
+    supplierId: row.supplier_id,
+    initialQuantityBase: Number(row.initial_quantity_base),
+    currentQuantityBase: Number(row.current_quantity_base),
+    costPerBase: Number(row.cost_per_base),
+    expiryDate: row.expiry_date,
+    status: row.status
+  };
+}
+
+function packageFromRow(row) {
+  return {
+    id: row.id,
+    productId: row.product_id,
+    packagingName: row.packaging_name,
+    multiplier: Number(row.multiplier_to_base),
+    multiplierToBase: Number(row.multiplier_to_base),
+    salePrice: row.sale_price != null ? Number(row.sale_price) : null,
+    unitId: row.unit_id
+  };
+}
+
+function customerFromRow(row) {
+  const debt = Number(row.current_debt || 0);
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    name: row.name,
+    document: row.document,
+    taxId: row.document,
+    phone: row.phone,
+    email: row.email,
+    address: row.address,
+    creditLimit: Number(row.credit_limit || 0),
+    currentDebt: debt,
+    creditBalance: debt
+  };
+}
+
+function supplierFromRow(row) {
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    name: row.name,
+    phone: row.phone,
+    email: row.email,
+    address: row.address,
+    nuitNif: row.nuit_nif,
+    notes: row.notes,
+    active: row.active !== false
+  };
+}
+
+function saleFromRow(row, items = []) {
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    sessionId: row.session_id,
+    saleNumber: row.code,
+    receiptNumber: row.receipt_number || row.code,
+    customerId: row.customer_id,
+    customerName: row.customer_name || 'Consumidor Final',
+    cashierName: row.cashier_name || '',
+    operatorId: row.operator_id,
+    subtotal: Number(row.total_gross),
+    totalGross: Number(row.total_gross),
+    discountAmount: Number(row.discount || 0),
+    discount: Number(row.discount || 0),
+    totalNet: Number(row.total_net),
+    total: Number(row.total_net),
+    totalCogs: Number(row.total_cogs || 0),
+    grossProfit: Number(row.gross_profit || 0),
+    paymentMethod: row.payment_method,
+    paymentDetails: row.payment_details || {},
+    needsDelivery: !!row.needs_delivery,
+    status: row.status,
+    reversalReason: row.reversal_reason,
+    reversedAt: row.reversed_at,
+    notes: row.notes,
+    createdAt: row.created_at,
+    timestamp: row.created_at,
+    items: items.filter(i => i.saleId === row.id)
+  };
+}
+
+function saleItemFromRow(row) {
+  return {
+    saleId: row.sale_id,
+    productId: row.product_id,
+    productName: row.product_name,
+    productCode: row.product_code,
+    batchId: row.batch_id,
+    batchNumber: row.batch_number,
+    packagingName: row.packaging_name,
+    selectedUnit: row.packaging_name,
+    quantity: Number(row.quantity),
+    quantitySold: Number(row.quantity),
+    quantityBase: Number(row.quantity_base ?? row.quantity),
+    multiplierToBase: Number(row.multiplier_to_base || 1),
+    unitPrice: Number(row.unit_price),
+    total: Number(row.total_price),
+    totalPrice: Number(row.total_price),
+    unitCogs: Number(row.unit_cogs || 0),
+    totalCogs: Number(row.total_cogs || 0),
+    location: row.location
+  };
+}
+
+const CASH_METHODS = new Set(['DINHEIRO', 'CASH']);
+
+function cashSessionFromRow(row, movements = []) {
+  const mine = movements.filter(m => m.session_id === row.id);
+  const sum = (fn) => mine.filter(fn).reduce((acc, m) => acc + Number(m.amount || 0), 0);
+  const cashSales = sum(m => m.movement_type === 'SALE' && CASH_METHODS.has(m.payment_method));
+  const mpesaSales = sum(m => m.movement_type === 'SALE' && m.payment_method === 'M-PESA');
+  const emolaSales = sum(m => m.movement_type === 'SALE' && m.payment_method === 'E-MOLA');
+  const posSales = sum(m => m.movement_type === 'SALE' && m.payment_method === 'POS_CARTAO');
+  const creditSales = sum(m => m.movement_type === 'SALE' && (m.payment_method === 'CREDITO_FIADO' || m.payment_method === 'FIADO'));
+  const totalSupplies = sum(m => m.movement_type === 'REFORCO');
+  const totalBleeds = sum(m => m.movement_type === 'SANGRIA_BANK' || m.movement_type === 'SANGRIA_SAFE');
+  const totalExpenses = sum(m => m.movement_type === 'DESPESA');
+  const cashReversals = sum(m => m.movement_type === 'ESTORNO' && CASH_METHODS.has(m.payment_method));
+  const opening = Number(row.opening_balance || 0);
+  const cashInDrawer = Number((opening + cashSales + totalSupplies - totalBleeds - totalExpenses - cashReversals).toFixed(2));
+  const closed = !!row.is_closed;
+  return {
+    id: row.id,
+    storeId: row.store_id,
+    operatorId: row.operator_id,
+    cashierId: row.operator_id,
+    cashierName: row.cashier_name || '',
+    operatorName: row.cashier_name || '',
+    openedAt: row.opened_at,
+    closedAt: row.closed_at,
+    openingBalance: opening,
+    initialCash: opening,
+    initialFloat: opening,
+    cashSales,
+    mpesaSales,
+    emolaSales,
+    posSales,
+    creditSales,
+    totalSupplies,
+    totalBleeds,
+    totalExpenses,
+    cashInDrawer,
+    expectedCash: closed && row.expected_cash != null ? Number(row.expected_cash) : cashInDrawer,
+    closingCountedBalance: row.declared_cash != null ? Number(row.declared_cash) : null,
+    closingExpectedBalance: row.expected_cash != null ? Number(row.expected_cash) : null,
+    countedCash: row.declared_cash != null ? Number(row.declared_cash) : null,
+    declaredCash: row.declared_cash != null ? Number(row.declared_cash) : null,
+    difference: row.difference != null ? Number(row.difference) : null,
+    status: closed ? 'CLOSED' : 'OPEN',
+    isClosed: closed,
+    notes: row.notes
+  };
+}
+
+function quoteFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, quoteNumber: r.quote_number || r.id, customerId: r.customer_id,
+    customerName: r.customer_name, phone: r.phone, projectLocation: r.project_location,
+    items: r.items || [], discount: Number(r.discount || 0), total: Number(r.total || 0),
+    validUntil: r.valid_until, status: r.status, convertedSaleId: r.converted_sale_id, createdAt: r.created_at
+  };
+}
+
+function deliveryFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, saleId: r.sale_id, saleNumber: r.sale_number, customerName: r.customer_name,
+    address: r.address, contactPhone: r.contact_phone, driverName: r.driver_name, vehiclePlate: r.vehicle_plate,
+    status: r.status, scheduledDate: r.scheduled_date, dispatchedAt: r.dispatched_at, deliveredAt: r.delivered_at,
+    items: r.items || [], notes: r.notes, createdAt: r.created_at
+  };
+}
+
+function lossFromRow(r) {
+  const qty = Number(r.quantity_base || 0);
+  return {
+    id: r.id, storeId: r.store_id, productId: r.product_id, productName: r.product_name, quantity: qty,
+    quantityBase: qty, unit: r.unit, costUnit: Number(r.cost_unit || 0), totalCost: Number(r.total_loss_cost || 0),
+    totalLossCost: Number(r.total_loss_cost || 0), location: r.location, reason: r.reason, notes: r.notes,
+    userName: r.user_name, date: r.created_at, createdAt: r.created_at, timestamp: r.created_at
+  };
+}
+
+function inventoryFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, code: r.code, operatorName: r.operator_name || '', reconciled: !!r.reconciled,
+    notes: r.notes, totalItemsAudited: r.total_items_audited, totalDivergentItems: r.total_divergent_items,
+    totalDivergenceValue: Number(r.total_divergence_value || 0), items: r.items || [],
+    timestamp: r.created_at, createdAt: r.created_at
+  };
+}
+
+function auditFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, action: r.action, entity: r.entity, entityId: r.entity_id,
+    details: r.details, description: r.details, createdAt: r.created_at, timestamp: r.created_at
+  };
+}
+
+function transferFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, productId: r.product_id, quantityBase: Number(r.quantity_base),
+    fromLocation: r.from_location, toLocation: r.to_location, notes: r.notes, timestamp: r.created_at, createdAt: r.created_at
+  };
+}
+
+function purchaseFromRow(r) {
+  return {
+    id: r.id, storeId: r.store_id, supplierId: r.supplier_id, supplierName: r.supplier_name,
+    invoiceNumber: r.invoice_number, destinationLocation: r.destination_location,
+    totalCost: Number(r.total_cost || 0), notes: r.notes, createdAt: r.created_at
+  };
+}
+
+class GefDatabase {
+  constructor() {
+    this.initialized = false;
+    this.currentStoreId = null;
+  }
+
+  requireClient() {
+    return requireClient();
+  }
+
+  unwrap(res, fallback) {
+    if (res && (res.error !== undefined || res.data !== undefined)) {
+      return unwrap(res, fallback);
+    }
+    return res ?? fallback;
+  }
+
+  async init() {
+    if (this.initialized) return;
+    this.initialized = true;
+  }
+
+  // --- STORES & MULTI-TENANCY ---
+  async getStores() {
+    const client = requireClient();
+    const rows = unwrap(await client.from('stores').select('*').order('name'), []);
+    return rows.map(s => ({
+      id: s.id,
+      code: s.code,
+      name: s.name,
+      tradeName: s.trade_name,
+      cnpjNif: s.nuit_nif,
+      city: s.city,
+      province: s.province,
+      address: s.address,
+      phone: s.phone,
+      email: s.email,
+      currency: s.currency,
+      language: s.language,
+      isHeadquarters: s.is_headquarters,
+      valorMensalidade: s.valor_mensalidade,
+      valor_mensalidade: s.valor_mensalidade,
+      receiptWidth: s.receipt_width || '80mm',
+      scaleProtocol: s.scale_protocol || '',
+      receiptFooter: s.receipt_footer || '',
+      data_fim_teste: s.data_fim_teste,
+      acesso_ativo: s.acesso_ativo,
+      motivo_bloqueio: s.motivo_bloqueio
+    }));
+  }
+
+  getCurrentStoreId() {
+    return this.currentStoreId || 'store-001';
+  }
+
+  setCurrentStoreId(storeId) {
+    this.currentStoreId = storeId;
+  }
+
+  async getCurrentStore() {
+    const id = this.getCurrentStoreId();
+    const stores = await this.getStores();
+    const found = stores.find(s => s.id === id) || stores[0];
+    if (found && found.currency) i18n.setCurrency(found.currency);
+    if (found && found.language) i18n.setLanguage(found.language);
+    return found || null;
+  }
+
+  async saveStore(store) {
+    const client = requireClient();
+    const row = {
+      id: store.id,
+      code: store.code,
+      name: store.name,
+      trade_name: store.tradeName,
+      nuit_nif: store.cnpjNif,
+      city: store.city,
+      province: store.province,
+      address: store.address,
+      phone: store.phone,
+      email: store.email,
+      currency: store.currency,
+      language: store.language,
+      receipt_width: store.receiptWidth,
+      scale_protocol: store.scaleProtocol,
+      receipt_footer: store.receiptFooter
+    };
+
+    if (store.valor_mensalidade !== undefined) row.valor_mensalidade = store.valor_mensalidade;
+    if (store.data_fim_teste !== undefined) row.data_fim_teste = store.data_fim_teste;
+    if (store.acesso_ativo !== undefined) row.acesso_ativo = store.acesso_ativo;
+    if (store.motivo_bloqueio !== undefined) row.motivo_bloqueio = store.motivo_bloqueio;
+
+    unwrap(await client.from('stores').upsert(row), null);
+    return store;
+  }
+
+  async deleteStore(storeId) {
+    const client = requireClient();
+    unwrap(await client.from('stores').delete().eq('id', storeId), null);
+    return true;
+  }
+
+  async getConfig() {
+    const store = await this.getCurrentStore();
+    if (!store) return {};
+    return {
+      ...store,
+      companyName: store.name,
+      brandName: store.tradeName || store.name,
+      nuit: store.cnpjNif,
+      receiptFooterMessage: store.receiptFooter
+    };
+  }
+
+  async saveConfig(config) {
+    const store = await this.getCurrentStore();
+    if (!store) return;
+    await this.saveStore({
+      ...store,
+      name: config.companyName || config.name || store.name,
+      tradeName: config.brandName || config.tradeName || store.tradeName,
+      cnpjNif: config.nuit || config.cnpjNif || store.cnpjNif,
+      phone: config.phone || store.phone,
+      email: config.email || store.email,
+      address: config.address || store.address,
+      currency: config.currency || store.currency,
+      language: config.language || store.language,
+      receiptWidth: config.receiptWidth || store.receiptWidth,
+      scaleProtocol: config.scaleProtocol ?? store.scaleProtocol,
+      receiptFooter: config.receiptFooter ?? store.receiptFooter
+    });
+    if (config.currency) i18n.setCurrency(config.currency);
+    if (config.language) i18n.setLanguage(config.language);
+  }
+
+  // --- UNITS ---
+  async getUnits() {
+    const client = requireClient();
+    const rows = unwrap(await client.from('units').select('*').order('name'), []);
+    return rows.map(u => ({ id: u.id, code: u.code, name: u.name, isFractional: !!u.is_fractional }));
+  }
+
+  // --- PRODUCTS, BATCHES & PACKAGES ---
+  async getProducts(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+    let query = client.from('products').select('*').order('name');
+    if (targetStore !== 'ALL') query = query.eq('store_id', targetStore);
+    const rows = unwrap(await query, []);
+    if (rows.length === 0) return [];
+
+    const ids = rows.map(r => r.id);
+
+    const batchRows = unwrap(
+      await client
+        .from('batches')
+        .select('*')
+        .in('product_id', ids)
+        .eq('status', 'ACTIVE')
+        .order('expiry_date'),
+      []
+    );
+
+    const packageRows = unwrap(
+      await client
+        .from('product_packages')
+        .select('*')
+        .in('product_id', ids),
+      []
+    );
+
+    const batches = batchRows.map(b => ({ ...batchFromRow(b), productId: b.product_id }));
+    const packages = packageRows.map(p => ({ ...packageFromRow(p), productId: p.product_id }));
+
+    return rows.map(r => productFromRow(r, batches, packages));
+  }
+
+  async getProductById(id) {
+    const client = requireClient();
+
+    const row = unwrap(
+      await client
+        .from('products')
+        .select('*')
+        .eq('id', id)
+        .maybeSingle(),
+      null
+    );
+
+    if (!row) return null;
+
+    const batchRows = unwrap(
+      await client
+        .from('batches')
+        .select('*')
+        .eq('product_id', id)
+        .eq('status', 'ACTIVE'),
+      []
+    );
+
+    const packageRows = unwrap(
+      await client
+        .from('product_packages')
+        .select('*')
+        .eq('product_id', id),
+      []
+    );
+
+    const batches = batchRows.map(b => ({ ...batchFromRow(b), productId: b.product_id }));
+    const packages = packageRows.map(p => ({ ...packageFromRow(p), productId: p.product_id }));
+
+    return productFromRow(row, batches, packages);
+  }
+
+  async saveProduct(product) {
+    const client = requireClient();
+    const isNew = !(await this.getProductById(product.id));
+
+    const row = {
+      id: product.id,
+      store_id: product.storeId || this.getCurrentStoreId(),
+      code: product.code,
+      barcode: product.barcode,
+      name: product.name,
+      category: product.category,
+      unit: product.baseUnit || 'UN',
+      cost_price: product.costPriceBase ?? 0,
+      sale_price: product.salePriceBase ?? 0,
+      wholesale_price: product.wholesalePrice ?? null,
+      min_stock: product.minStockBase ?? 10,
+      is_fractional: !!product.isFractional,
+      active: product.active !== false
+    };
+
+    if (isNew) {
+      row.current_stock = product.currentStockBase ?? 0;
+      row.stock_loja = product.stockByLocation?.LOJA ?? 0;
+      row.stock_armazem = product.stockByLocation?.ARMAZEM ?? 0;
+      row.stock_patio = product.stockByLocation?.PATIO ?? 0;
+    }
+
+    unwrap(await client.from('products').upsert(row), null);
+
+    if (Array.isArray(product.conversions)) {
+      unwrap(
+        await client
+          .from('product_packages')
+          .delete()
+          .eq('product_id', product.id),
+        null
+      );
+
+      const pkgRows = product.conversions
+        .filter(c => c.packagingName && c.multiplierToBase)
+        .map(c => ({
+          id: c.id || ('pkg-' + Date.now() + '-' + Math.floor(Math.random() * 9000)),
+          product_id: product.id,
+          packaging_name: c.packagingName,
+          multiplier_to_base: c.multiplierToBase || c.multiplier || 1,
+          sale_price: c.salePrice ?? null
+        }));
+
+      if (pkgRows.length > 0) {
+        unwrap(
+          await client
+            .from('product_packages')
+            .insert(pkgRows),
+          null
+        );
+      }
+    }
+
+    return product;
+  }
+
+  async deleteProduct(id) {
+    const client = requireClient();
+    unwrap(await client.from('products').delete().eq('id', id), null);
+    return true;
+  }
+
+  async getAllBatches(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('batches')
+      .select('*, products(name)')
+      .order('expiry_date');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    const rows = unwrap(await query, []);
+
+    return rows.map(r => ({
+      ...batchFromRow(r),
+      productName: r.products?.name
+    }));
+  }
+
+  // --- CUSTOMERS ---
+  async getCustomers(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('customers')
+      .select('*')
+      .order('name');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    const rows = unwrap(await query, []);
+
+    return rows.map(customerFromRow);
+  }
+
+  async saveCustomer(customer) {
+    const client = requireClient();
+
+    const row = {
+      id: customer.id,
+      store_id: customer.storeId || this.getCurrentStoreId(),
+      name: customer.name,
+      document: customer.document || customer.taxId,
+      phone: customer.phone,
+      email: customer.email,
+      address: customer.address,
+      credit_limit: customer.creditLimit ?? 0,
+      current_debt: customer.currentDebt ?? customer.creditBalance ?? 0
+    };
+
+    unwrap(await client.from('customers').upsert(row), null);
+
+    return customer;
+  }
+
+  async deleteCustomer(id) {
+    const client = requireClient();
+    unwrap(await client.from('customers').delete().eq('id', id), null);
+    return true;
+  }
+
+  // --- SUPPLIERS ---
+  async getSuppliers(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('suppliers')
+      .select('*')
+      .order('name');
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    const rows = unwrap(await query, []);
+
+    return rows.map(supplierFromRow);
+  }
+
+  async saveSupplier(supplier) {
+    const client = requireClient();
+
+    const row = {
+      id: supplier.id,
+      store_id: supplier.storeId || this.getCurrentStoreId(),
+      name: supplier.name,
+      phone: supplier.phone,
+      email: supplier.email,
+      address: supplier.address,
+      nuit_nif: supplier.nuitNif,
+      notes: supplier.notes,
+      active: supplier.active !== false
+    };
+
+    unwrap(await client.from('suppliers').upsert(row), null);
+
+    return supplier;
+  }
+
+  async deleteSupplier(id) {
+    const client = requireClient();
+    unwrap(await client.from('suppliers').delete().eq('id', id), null);
+    return true;
+  }
+
+  // --- CASH SESSIONS, SANGRIAS, SUPRIMENTOS, DESPESAS (todas via RPC) ---
+  async getCashSessions(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('cash_sessions')
+      .select('*')
+      .order('opened_at', { ascending: false })
+      .limit(200);
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    const rows = unwrap(await query, []);
+
+    if (rows.length === 0) return [];
+
+    const movements = unwrap(
+      await client
+        .from('cash_movements')
+        .select('*')
+        .in('session_id', rows.map(r => r.id)),
+      []
+    );
+
+    return rows.map(r => cashSessionFromRow(r, movements));
+  }
+
+  async getActiveCashSession(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    if (targetStore === 'ALL') return null;
+
+    const row = unwrap(
+      await client
+        .from('cash_sessions')
+        .select('*')
+        .eq('store_id', targetStore)
+        .eq('is_closed', false)
+        .order('opened_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      null
+    );
+
+    if (!row) return null;
+
+    const movements = unwrap(
+      await client
+        .from('cash_movements')
+        .select('*')
+        .eq('session_id', row.id),
+      []
+    );
+
+    return cashSessionFromRow(row, movements);
+  }
+
+  async openCashSession(storeId, initialCash, cashierName) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    const row = unwrap(
+      await client.rpc('fn_open_cash_session', {
+        p_store_id: targetStore,
+        p_initial_cash: Number(initialCash) || 0,
+        p_cashier_name: cashierName || null
+      }),
+      null
+    );
+
+    return cashSessionFromRow(row, []);
+  }
+
+  async closeCashSession(sessionId, countedCash, notes) {
+    const client = requireClient();
+
+    const row = unwrap(
+      await client.rpc('fn_close_cash_session', {
+        p_session_id: sessionId,
+        p_counted_cash: countedCash,
+        p_notes: notes || null,
+        p_operator_id: null
+      }),
+      null
+    );
+
+    return cashSessionFromRow(row, []);
+  }
+
+  async registerCashMovement(sessionId, type, amount, reason, notes) {
+    const client = requireClient();
+
+    return unwrap(
+      await client.rpc('fn_register_cash_movement', {
+        p_session_id: sessionId,
+        p_type: type,
+        p_amount: amount,
+        p_reason: reason,
+        p_notes: notes || null
+      }),
+      null
+    );
+  }
+
+  async registerSangria(sessionId, amount, reason, destination = 'SANGRIA_SAFE') {
+    return this.registerCashMovement(sessionId, destination, amount, reason);
+  }
+
+  async registerSuprimento(sessionId, amount, reason) {
+    return this.registerCashMovement(sessionId, 'REFORCO', amount, reason);
+  }
+
+  async registerExpense(sessionId, amount, reason) {
+    return this.registerCashMovement(sessionId, 'DESPESA', amount, reason);
+  }
+
+  async getCashMovements(sessionId) {
+    const client = requireClient();
+
+    let query = client
+      .from('cash_movements')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (sessionId) {
+      query = query.eq('session_id', sessionId);
+    }
+
+    return unwrap(await query, []);
+  }
+
+  // --- SALES & ATOMIC POS (FEFO via RPC) ---
+  async getSales(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('sales')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    const rows = unwrap(await query, []);
+
+    if (rows.length === 0) return [];
+
+    const ids = rows.map(r => r.id);
+
+    const itemRows = unwrap(
+      await client
+        .from('sale_items')
+        .select('*')
+        .in('sale_id', ids),
+      []
+    );
+
+    const items = itemRows.map(i => ({
+      ...saleItemFromRow(i),
+      saleId: i.sale_id
+    }));
+
+    return rows.map(r => saleFromRow(r, items));
+  }
+
+  async getSaleById(saleId) {
+    const client = requireClient();
+
+    const row = unwrap(
+      await client
+        .from('sales')
+        .select('*')
+        .eq('id', saleId)
+        .maybeSingle(),
+      null
+    );
+
+    if (!row) return null;
+
+    const itemRows = unwrap(
+      await client
+        .from('sale_items')
+        .select('*')
+        .eq('sale_id', saleId),
+      []
+    );
+
+    return saleFromRow(
+      row,
+      itemRows.map(saleItemFromRow)
+    );
+  }
+
+  async processAtomicSale(
+    storeId,
+    sessionId,
+    customerName,
+    customerTaxId,
+    paymentMethod,
+    discountAmount,
+    items,
+    extraInfo = {}
+  ) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    const row = unwrap(
+      await client.rpc('fn_process_atomic_sale', {
+        p_store_id: targetStore,
+        p_session_id: sessionId || null,
+        p_customer_id: extraInfo.customerId || null,
+        p_customer_name: customerName,
+        p_payment_method: paymentMethod,
+        p_discount: discountAmount || 0,
+        p_items: items.map(it => ({
+          productId: it.productId,
+          quantity: it.quantity,
+          unitPrice: it.unitPrice,
+          multiplierToBase: it.multiplierToBase || it.multiplier || 1,
+          packagingName: it.packagingName || it.packageName || it.selectedUnit || null
+        })),
+        p_operator_id: null,
+        p_notes: extraInfo.notes || null,
+        p_cashier_name: extraInfo.cashierName || null,
+        p_payment_details: extraInfo.paymentDetails || {},
+        p_needs_delivery: !!extraInfo.needsDelivery
+      }),
+      null
+    );
+
+    const sale = await this.getSaleById(row.id);
+
+    return {
+      success: true,
+      sale_id: sale.id,
+      receipt_number: sale.receiptNumber,
+      total_gross: sale.totalGross,
+      discount_amount: sale.discount,
+      total_net: sale.totalNet,
+      payment_method: sale.paymentMethod,
+      sale
+    };
+  }
+
+  async reverseSale(saleId, reason) {
+    const client = requireClient();
+
+    unwrap(
+      await client.rpc('fn_reverse_sale', {
+        p_sale_id: saleId,
+        p_reason: reason,
+        p_operator_id: null
+      }),
+      null
+    );
+
+    return true;
+  }
+
+  // --- PURCHASES (via RPC) ---
+  async getPurchases(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('purchases')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    return unwrap(await query, []).map(purchaseFromRow);
+  }
+
+  async savePurchase(purchase, operatorId) {
+    const client = requireClient();
+    const targetStore = purchase.storeId || this.getCurrentStoreId();
+
+    const row = unwrap(
+      await client.rpc('fn_confirm_purchase', {
+        p_store_id: targetStore,
+        p_supplier_id: purchase.supplierId || null,
+        p_supplier_name: purchase.supplierName || null,
+        p_invoice_number: purchase.invoiceNumber || null,
+        p_destination_location: purchase.destinationLocation || 'ARMAZEM',
+        p_items: purchase.items || [],
+        p_operator_id: null,
+        p_notes: purchase.notes || null
+      }),
+      null
+    );
+
+    return row;
+  }
+
+  // --- LOSSES / AVARIAS (via RPC) ---
+  async getLosses(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('losses')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    return unwrap(await query, []).map(lossFromRow);
+  }
+
+  async registerLoss(loss) {
+    const client = requireClient();
+    const targetStore = loss.storeId || this.getCurrentStoreId();
+
+    const row = unwrap(
+      await client.rpc('fn_register_loss', {
+        p_store_id: targetStore,
+        p_product_id: loss.productId,
+        p_quantity_base: loss.quantityBase || loss.quantity,
+        p_location: loss.location || 'LOJA',
+        p_reason: loss.reason,
+        p_operator_id: null,
+        p_notes: loss.notes || null
+      }),
+      null
+    );
+
+    return lossFromRow(row);
+  }
+
+  // --- QUOTES / ORÇAMENTOS DE OBRA ---
+  async getQuotes(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('quotes')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    return unwrap(await query, []).map(quoteFromRow);
+  }
+
+  async saveQuote(quote) {
+    const client = requireClient();
+
+    const row = {
+      id: quote.id,
+      store_id: quote.storeId || this.getCurrentStoreId(),
+      quote_number: quote.quoteNumber || null,
+      customer_id: quote.customerId || null,
+      customer_name: quote.customerName,
+      phone: quote.phone || null,
+      project_location: quote.projectLocation || null,
+      items: quote.items || [],
+      discount: quote.discount || 0,
+      total: quote.total || 0,
+      valid_until: quote.validUntil || null,
+      status: quote.status || 'RASCUNHO',
+      updated_at: new Date().toISOString()
+    };
+
+    unwrap(await client.from('quotes').upsert(row), null);
+
+    return quote;
+  }
+
+  async deleteQuote(id) {
+    const client = requireClient();
+
+    unwrap(
+      await client
+        .from('quotes')
+        .delete()
+        .eq('id', id),
+      null
+    );
+
+    return true;
+  }
+
+  // --- DELIVERIES EM CANTEIRO ---
+  async getDeliveries(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('deliveries')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    return unwrap(await query, []).map(deliveryFromRow);
+  }
+
+  async saveDelivery(delivery) {
+    const client = requireClient();
+
+    const row = {
+      id: delivery.id,
+      store_id: delivery.storeId || this.getCurrentStoreId(),
+      sale_id: delivery.saleId || null,
+      sale_number: delivery.saleNumber || null,
+      customer_name: delivery.customerName,
+      address: delivery.address,
+      contact_phone: delivery.contactPhone || null,
+      driver_name: delivery.driverName || null,
+      vehicle_plate: delivery.vehiclePlate || null,
+      status: delivery.status || 'PENDENTE',
+      scheduled_date: delivery.scheduledDate || null,
+      dispatched_at: delivery.dispatchedAt || null,
+      delivered_at: delivery.status === 'ENTREGUE'
+        ? (delivery.deliveredAt || new Date().toISOString())
+        : null,
+      items: delivery.items || [],
+      notes: delivery.notes || null
+    };
+
+    unwrap(
+      await client
+        .from('deliveries')
+        .upsert(row),
+      null
+    );
+
+    return delivery;
+  }
+
+  async deleteDelivery(id) {
+    const client = requireClient();
+
+    unwrap(
+      await client
+        .from('deliveries')
+        .delete()
+        .eq('id', id),
+      null
+    );
+
+    return true;
+  }
+
+  // --- TRANSFERS (via RPC) ---
+  async getTransfers(storeId) {
+    const client = requireClient();
+    const targetStore = storeId || this.getCurrentStoreId();
+
+    let query = client
+      .from('transfers')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq('store_id', targetStore);
+    }
+
+    return unwrap(await query, []).map(transferFromRow);
+  }
+
+  async saveTransfer(transfer, operatorId) {
+    const client = requireClient();
+    const targetStore = transfer.storeId || this.getCurrentStoreId();
+
+    return unwrap(
+      await client.rpc('fn_transfer_stock', {
+        p_store_id: targetStore,
+        p_product_id: transfer.productId,
+        p_quantity_base: transfer.quantityBase,
+        p_from_location: transfer.fromLocation,
+        p_to_location: transfer.toLocation,
+        p_operator_id: null,
+        p_notes: transfer.notes || null
+      }),
+      null
+    );
+  }
+
+  async transferStock(transferObj, operatorId) {
+    return this.saveTransfer(transferObj, operatorId);
+  }
+
+  // --- CUSTOMER CREDIT & PAYMENTS (via RPC) ---
+  async getCustomerCreditHistory(customerId) {
+    const client = requireClient();
+
+    return unwrap(
+      await client
+        .from('credit_transactions')
+        .select('*')
+        .eq('customer_id', customerId)
+        .order('created_at', { ascending: false }),
+      []
+    );
+  }
+
+  async registerCustomerPayment(
+    customerId,
+    amount,
+    paymentMethod,
+    sessionId,
+    notes
+  ) {
+    const client = requireClient();
+
+    const row = unwrap(
+      await client.rpc('fn_register_customer_payment', {
+        p_customer_id: customerId,
+        p_amount: amount,
+        p_notes: notes || 'Pagamento de conta',
+        p_operator_id: null,
+        p_payment_method: paymentMethod || 'DINHEIRO',
+        p_session_id: sessionId || null
+      }),
+      null
+    );
+
+    return customerFromRow(row);
+  }
+
+  // ============================================================
+  // --- AMBASSADORS & PARTNERS ---
+  // ============================================================
+
+  _normalizeAmbassadorStatus(status, active = true) {
+    const value = String(status || '').toUpperCase().trim();
+
+    if (value === 'ATIVO') return 'ATIVO';
+    if (value === 'BLOQUEADO') return 'BLOQUEADO';
+    if (value === 'DESATIVADO') return 'DESATIVADO';
+    if (value === 'INATIVO') return 'DESATIVADO';
+
+    return active === false ? 'DESATIVADO' : 'ATIVO';
+  }
+
+  // Consulta pública pelo código de indicação do link (ex: ?ref=CODIGO)
+  // Não exige que o utilizador já esteja autenticado
+  async getAmbassadorByCode(referralCode) {
+    const client = this.requireClient();
+    const cleanCode = String(referralCode || '').trim();
+
+    if (!cleanCode) return null;
+
+    const { data, error } = await client
+      .from('ambassadors')
+      .select('id, name, referral_code, status, active, commission_rate')
+      .ilike('referral_code', cleanCode)
+      .maybeSingle();
+
+    if (error || !data) return null;
+
+    const status = this._normalizeAmbassadorStatus(data.status, data.active);
+    if (status !== 'ATIVO') {
+      throw new Error('Este link de embaixador não se encontra ativo.');
+    }
+
+    return {
+      id: data.id,
+      name: data.name,
+      code: data.referral_code,
+      status,
+      commissionRate: Number(data.commission_rate || 0)
+    };
+  }
+
+  async getAmbassadors() {
+    const client = this.requireClient();
+
+    const { data: { user } = {} } = await client.auth.getUser();
+
+    if (!user) {
+      throw new Error('Utilizador não autenticado.');
+    }
+
+    // Descobrir o perfil atual
+    const { data: profile, error: profileError } = await client
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (profileError) {
+      throw profileError;
+    }
+
+    const role = normalizeRole(profile?.role);
+
+    let query = client
+      .from('ambassadors')
+      .select(`
+        *,
+        ambassador_referred_stores(*),
+        ambassador_payouts(*)
+      `)
+      .order('created_at', { ascending: false });
+
+    // Superadmin vê todos. Embaixador vê somente o próprio registo.
+    if (role !== 'SUPERADMIN') {
+      query = query.eq('user_id', user.id);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      throw error;
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+
+    return rows.map((a) => {
+      const status = this._normalizeAmbassadorStatus(
+        a.status,
+        a.active
+      );
+
+      const referredStores = Array.isArray(a.ambassador_referred_stores)
+        ? a.ambassador_referred_stores
+        : [];
+
+      const payouts = Array.isArray(a.ambassador_payouts)
+        ? a.ambassador_payouts
+        : [];
+
+      const paidCommissions = payouts.reduce(
+        (sum, payout) => sum + Number(payout.amount || 0),
+        0
+      );
+
+      return {
+        id: a.id,
+        userId: a.user_id,
+
+        name: a.name || '',
+        phone: a.phone || '',
+        pixMpesa: a.pix_mpesa || '',
+        paymentDetails: a.pix_mpesa || '',
+
+        code: a.referral_code || '',
+
+        commissionRate: Number(a.commission_rate || 0),
+
+        totalEarned: Number(a.total_earned || 0),
+        pendingCommissions: Number(a.pending_commissions || 0),
+        paidCommissions,
+
+        status,
+        active: status !== 'DESATIVADO',
+        createdAt: a.created_at,
+
+        referredStores: referredStores.map((store) => ({
+          id: store.id,
+          ambassadorId: store.ambassador_id,
+          storeId: store.store_id || null,
+
+          name: store.name || '',
+          ownerName: store.owner_name || '',
+          phone: store.phone || '',
+          city: store.city || '',
+
+          monthlyFee: Number(store.monthly_fee || 0),
+
+          paymentStatus: store.payment_status || 'PENDENTE',
+          lastPaymentDate: store.last_payment_date || null,
+          nextDueDate: store.next_due_date || null,
+
+          commissionRate: Number(
+            store.commission_rate ?? a.commission_rate ?? 0
+          ),
+
+          contractDurationMonths: Number(
+            store.contract_duration_months || 0
+          ),
+
+          monthsActive: Number(
+            store.months_active || 0
+          ),
+
+          totalCommissionEarned: Number(
+            store.total_commission_earned || 0
+          ),
+
+          createdAt: store.created_at
+        })),
+
+        payoutHistory: payouts.map((payout) => ({
+          id: payout.id,
+          ambassadorId: payout.ambassador_id,
+          amount: Number(payout.amount || 0),
+          method: payout.method || '',
+          receipt: payout.receipt || '',
+          status: payout.status || '',
+          createdAt: payout.created_at
+        })),
+
+        totalStores: referredStores.length,
+
+        activeStores: referredStores.filter(
+          store =>
+            String(store.payment_status || '').toUpperCase() === 'PAGO'
+        ).length
+      };
+    });
+  }
+
+  // ------------------------------------------------------------
+  // Criar / atualizar dados básicos do embaixador
+  // ------------------------------------------------------------
+  async saveAmbassador(ambassador) {
+    const client = this.requireClient();
+
+    if (!ambassador?.id) {
+      throw new Error('ID do embaixador é obrigatório.');
+    }
+
+    const name = String(ambassador.name || '').trim();
+    const phone = String(ambassador.phone || '').trim();
+    const pixMpesa = String(
+      ambassador.pixMpesa ??
+      ambassador.paymentDetails ??
+      ''
+    ).trim();
+
+    const commissionRate = Number(
+      ambassador.commissionRate ?? 0
+    );
+
+    if (!name) {
+      throw new Error('Nome do embaixador é obrigatório.');
+    }
+
+    if (!phone) {
+      throw new Error('Telefone do embaixador é obrigatório.');
+    }
+
+    if (!Number.isFinite(commissionRate) || commissionRate < 0) {
+      throw new Error('Taxa de comissão inválida.');
+    }
+
+    const res = await client.rpc(
+      'fn_admin_update_ambassador',
+      {
+        p_ambassador_id: ambassador.id,
+        p_name: name,
+        p_phone: phone,
+        p_pix_mpesa: pixMpesa,
+        p_commission_rate: commissionRate
+      }
+    );
+
+    return this.unwrap(res);
+  }
+
+  // ------------------------------------------------------------
+  // Alterar estado do embaixador
+  // ATIVO | BLOQUEADO | DESATIVADO
+  // ------------------------------------------------------------
+  async setAmbassadorStatus(ambassadorId, status) {
+    const client = this.requireClient();
+
+    if (!ambassadorId) {
+      throw new Error('ID do embaixador é obrigatório.');
+    }
+
+    const normalizedStatus = this._normalizeAmbassadorStatus(status);
+
+    const res = await client.rpc(
+      'fn_admin_set_ambassador_status',
+      {
+        p_ambassador_id: ambassadorId,
+        p_status: normalizedStatus
+      }
+    );
+
+    return this.unwrap(res);
+  }
+
+  async activateAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(ambassadorId, 'ATIVO');
+  }
+
+  async blockAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(ambassadorId, 'BLOQUEADO');
+  }
+
+  async deactivateAmbassador(ambassadorId) {
+    return this.setAmbassadorStatus(ambassadorId, 'DESATIVADO');
+  }
+
+  // ------------------------------------------------------------
+  // Aprovar loja indicada
+  // ------------------------------------------------------------
+  async approveAmbassadorStore(referredStoreId) {
+    const client = this.requireClient();
+
+    if (!referredStoreId) {
+      throw new Error('ID da loja indicada é obrigatório.');
+    }
+
+    const res = await client.rpc(
+      'fn_approve_ambassador_store',
+      {
+        p_referred_store_id: referredStoreId
+      }
+    );
+
+    return this.unwrap(res);
+  }
+
+  // ------------------------------------------------------------
+  // Rejeitar loja indicada
+  // ------------------------------------------------------------
+  async rejectAmbassadorStore(referredStoreId, reason = null) {
+    const client = this.requireClient();
+
+    if (!referredStoreId) {
+      throw new Error('ID da loja indicada é obrigatório.');
+    }
+
+    const res = await client.rpc(
+      'fn_reject_ambassador_store',
+      {
+        p_referred_store_id: referredStoreId,
+        p_reason: reason || null
+      }
+    );
+
+    return this.unwrap(res);
+  }
+
+  // ------------------------------------------------------------
+  // Pagar / liquidar comissão
+  // ------------------------------------------------------------
+  async payAmbassadorCommission(
+    ambassadorId,
+    amount,
+    method,
+    ref = ''
+  ) {
+    const client = this.requireClient();
+
+    if (!ambassadorId) {
+      throw new Error('ID do embaixador é obrigatório.');
+    }
+
+    const paidAmount = Number(amount);
+
+    if (!Number.isFinite(paidAmount) || paidAmount <= 0) {
+      throw new Error('Valor da comissão inválido.');
+    }
+
+    const paymentMethod = String(method || '').trim();
+
+    if (!paymentMethod) {
+      throw new Error('Método de pagamento é obrigatório.');
+    }
+
+    const receipt = String(ref || '').trim();
+
+    const res = await client.rpc(
+      'fn_admin_pay_ambassador_commission',
+      {
+        p_ambassador_id: ambassadorId,
+        p_amount: paidAmount,
+        p_method: paymentMethod,
+        p_receipt: receipt
+      }
+    );
+
+    return this.unwrap(res);
+  }
+
+  // ------------------------------------------------------------
+  // Adicionar / Cadastrar loja indicada via Link ou Painel
+  // Suporta tanto o UUID do embaixador quanto o referral_code do link
+  // ------------------------------------------------------------
+  async addAmbassadorReferredStore(
+    ambassadorIdOrCode,
+    storeData
+  ) {
+    const client = this.requireClient();
+
+    if (!storeData?.name) {
+      throw new Error('Nome da loja é obrigatório.');
+    }
+
+    const inputRef = String(ambassadorIdOrCode || storeData.referralCode || storeData.ambassadorCode || '').trim();
+
+    if (!inputRef) {
+      throw new Error('Código ou identificador do embaixador é obrigatório.');
+    }
+
+    // Se o input não tiver formato de UUID (36 chars com hífens), resolve pelo referral_code
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(inputRef);
+    let resolvedAmbassadorId = inputRef;
+    let ambassadorCommissionRate = Number(storeData.commissionRate ?? 15);
+
+    if (!isUuid) {
+      const amb = await this.getAmbassadorByCode(inputRef);
+      if (!amb) {
+        throw new Error('Embaixador não encontrado ou link inativo.');
+      }
+      resolvedAmbassadorId = amb.id;
+      if (!storeData.commissionRate && amb.commissionRate) {
+        ambassadorCommissionRate = amb.commissionRate;
+      }
+    }
+
+    const monthlyFee = Number(
+      storeData.monthlyFee ?? storeData.valorMensalidade ?? 0
+    );
+
+    const paymentStatus =
+      storeData.paymentStatus || 'PENDENTE';
+
+    const commission =
+      paymentStatus === 'PAGO'
+        ? (monthlyFee * ambassadorCommissionRate) / 100
+        : 0;
+
+    // 1. Tenta cadastrar via RPC do Postgres (evita bloqueio de RLS no cliente anônimo)
+    try {
+      const rpcResult = await client.rpc('fn_register_referred_store', {
+        p_ambassador_id: resolvedAmbassadorId,
+        p_store_name: String(storeData.name).trim(),
+        p_owner_name: String(storeData.ownerName || '').trim() || null,
+        p_phone: String(storeData.phone || '').trim() || null,
+        p_city: String(storeData.city || '').trim() || null,
+        p_monthly_fee: monthlyFee,
+        p_store_id: storeData.storeId || null
+      });
+
+      if (rpcResult.data && !rpcResult.error) {
+        return rpcResult.data;
+      }
+    } catch (_) {
+      // Fallback para inserção direta se a RPC específica não existir no banco
+    }
+
+    // 2. Inserção direta na tabela ambassador_referred_stores
+    const generatedId = (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
+      ? crypto.randomUUID()
+      : ('ref-' + Date.now() + '-' + Math.random().toString(36).substring(2, 9));
+
+    const row = {
+      id: storeData.id || generatedId,
+
+      ambassador_id: resolvedAmbassadorId,
+
+      name: String(storeData.name).trim(),
+
+      owner_name:
+        String(storeData.ownerName || '').trim() || null,
+
+      phone:
+        String(storeData.phone || '').trim() || null,
+
+      city:
+        String(storeData.city || '').trim() || null,
+
+      monthly_fee: monthlyFee,
+
+      payment_status: paymentStatus,
+
+      last_payment_date:
+        storeData.lastPaymentDate || null,
+
+      next_due_date:
+        storeData.nextDueDate || null,
+
+      commission_rate: ambassadorCommissionRate,
+
+      contract_duration_months:
+        Number(storeData.contractDurationMonths || 12),
+
+      months_active:
+        Number(storeData.monthsActive || 0),
+
+      total_commission_earned:
+        Number(storeData.totalCommissionEarned || commission)
+    };
+
+    if (storeData.storeId) {
+      row.store_id = storeData.storeId;
+    }
+
+    const { data, error } = await client
+      .from('ambassador_referred_stores')
+      .insert(row)
+      .select()
+      .single();
+
+    if (error) {
+      throw new Error(`Falha ao registrar loja do embaixador: ${error.message}`);
+    }
+
+    return data;
+  }
+
+  // ------------------------------------------------------------
+  // Compatibilidade: método antigo para pagamento
+  // ------------------------------------------------------------
+  async settleAmbassadorCommission(
+    ambassadorId,
+    amount,
+    method,
+    ref = ''
+  ) {
+    return this.payAmbassadorCommission(
+      ambassadorId,
+      amount,
+      method,
+      ref
+    );
+  }
+
+  // --- SAAS & LOCK ENGINE ---
+  checkStoreLock(store) {
+    if (!store) {
+      return {
+        isLocked: false,
+        daysRemaining: 999,
+        reason: '',
+        store: null
+      };
+    }
+
+    if (store.acesso_ativo === false) {
+      return {
+        isLocked: true,
+        daysRemaining: 0,
+        reason:
+          store.motivo_bloqueio ||
+          'Acesso suspenso pelo administrador do sistema GEF.',
+        store
+      };
+    }
+
+    if (store.data_fim_teste) {
+      const diffDays =
+        Math.ceil(
+          (
+            new Date(
+              store.data_fim_teste
+            ).getTime() -
+            Date.now()
+          ) /
+          86400000
+        );
+
+      if (diffDays <= 0) {
+        return {
+          isLocked: true,
+          daysRemaining: diffDays,
+          reason:
+            `A assinatura da loja expirou em ${new Date(store.data_fim_teste).toLocaleDateString('pt-PT')}. Regularize para continuar faturando.`,
+          store
+        };
+      }
+
+      return {
+        isLocked: false,
+        daysRemaining: diffDays,
+        reason: '',
+        store
+      };
+    }
+
+    return {
+      isLocked: false,
+      daysRemaining: 999,
+      reason: '',
+      store
+    };
+  }
+
+  async toggleStoreAccess(
+    storeId,
+    acessoAtivo,
+    motivo
+  ) {
+    const client = requireClient();
+
+    return unwrap(
+      await client
+        .from('stores')
+        .update({
+          acesso_ativo: acessoAtivo,
+          motivo_bloqueio:
+            motivo ||
+            (
+              acessoAtivo
+                ? null
+                : 'Assinatura vencida / Bloqueio administrativo'
+            )
+        })
+        .eq('id', storeId)
+        .select()
+        .maybeSingle(),
+      null
+    );
+  }
+
+  async renewStoreSubscription(
+    storeId,
+    daysToAdd = 30
+  ) {
+    const client = requireClient();
+
+    return unwrap(
+      await client.rpc(
+        'fn_renew_store_subscription',
+        {
+          p_store_id: storeId,
+          p_days: daysToAdd
+        }
+      ),
+      null
+    );
+  }
+
+  // --- DASHBOARD METRICS ---
+  async getDashboardStats(storeId) {
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    const [
+      products,
+      customers,
+      sales,
+      quotes,
+      deliveries,
+      losses
+    ] = await Promise.all([
+      this.getProducts(targetStore),
+      this.getCustomers(targetStore),
+      this.getSales(targetStore),
+      this.getQuotes(targetStore),
+      this.getDeliveries(targetStore),
+      this.getLosses(targetStore)
+    ]);
+
+    const todayStr =
+      new Date()
+        .toISOString()
+        .split('T')[0];
+
+    const firstDayOfMonth =
+      todayStr.slice(0, 7) +
+      '-01';
+
+    const validSales =
+      sales.filter(
+        s => s.status === 'CONCLUIDA'
+      );
+
+    const todaySales =
+      validSales.filter(
+        s =>
+          (s.createdAt || '')
+            .startsWith(todayStr)
+      );
+
+    const monthSales =
+      validSales.filter(
+        s =>
+          (s.createdAt || '') >=
+          firstDayOfMonth
+      );
+
+    const totalTodaySales =
+      todaySales.reduce(
+        (acc, s) =>
+          acc +
+          (s.total || 0),
+        0
+      );
+
+    const monthSalesRevenue =
+      monthSales.reduce(
+        (acc, s) =>
+          acc +
+          (s.total || 0),
+        0
+      );
+
+    const batches =
+      await this.getAllBatches(
+        targetStore
+      );
+
+    const batchCost =
+      batches.reduce(
+        (sum, b) =>
+          sum +
+          (
+            b.currentQuantityBase *
+            b.costPerBase
+          ),
+        0
+      );
+
+    const productCost =
+      products.reduce(
+        (sum, p) =>
+          sum +
+          (
+            p.currentStockBase *
+            p.costPriceBase
+          ),
+        0
+      );
+
+    const stockCostTotal =
+      Number(
+        (
+          batches.length > 0
+            ? batchCost
+            : productCost
+        ).toFixed(2)
+      );
+
+    const stockSaleValuation =
+      Number(
+        products
+          .reduce(
+            (sum, p) =>
+              sum +
+              (
+                p.currentStockBase *
+                p.salePriceBase
+              ),
+            0
+          )
+          .toFixed(2)
+      );
+
+    const activeShift =
+      await this.getActiveCashSession(
+        targetStore
+      );
+
+    const currentCashInDrawer =
+      activeShift
+        ? activeShift.expectedCash || 0
+        : 0;
+
+    const totalReceivable =
+      customers.reduce(
+        (sum, c) =>
+          sum +
+          (c.currentDebt || 0),
+        0
+      );
+
+    const lowStockList =
+      products.filter(
+        p =>
+          p.currentStockBase > 0 &&
+          p.currentStockBase <=
+            p.minStockAlert
+      );
+
+    const outOfStockList =
+      products.filter(
+        p =>
+          p.currentStockBase <= 0
+      );
+
+    const totalLossCost =
+      losses.reduce(
+        (sum, l) =>
+          sum +
+          (l.totalLossCost || 0),
+        0
+      );
+
+    return {
+      totalTodaySales,
+      todaySalesCount:
+        todaySales.length,
+
+      totalRealEquity:
+        Number(
+          (
+            stockCostTotal +
+            currentCashInDrawer
+          ).toFixed(2)
+        ),
+
+      stockCostTotal,
+      stockSaleValuation,
+      currentCashInDrawer,
+      totalReceivable,
+
+      lowStockCount:
+        lowStockList.length,
+
+      outOfStockCount:
+        outOfStockList.length,
+
+      pendingQuotesCount:
+        quotes.filter(
+          q =>
+            [
+              'RASCUNHO',
+              'PENDENTE',
+              'ENVIADO'
+            ].includes(q.status)
+        ).length,
+
+      pendingDeliveriesCount:
+        deliveries.filter(
+          d =>
+            d.status !== 'ENTREGUE' &&
+            d.status !== 'CANCELADA'
+        ).length,
+
+      recentSales:
+        sales.slice(0, 8),
+
+      totalLossCost
+    };
+  }
+
+  // --- AUDIT LOGS (somente leitura; escrita acontece dentro das RPCs) ---
+  async getAuditLogs(storeId) {
+    const client = requireClient();
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    let query = client
+      .from('audit_logs')
+      .select('*')
+      .order('created_at', {
+        ascending: false
+      })
+      .limit(500);
+
+    if (targetStore !== 'ALL') {
+      query = query.eq(
+        'store_id',
+        targetStore
+      );
+    }
+
+    return unwrap(
+      await query,
+      []
+    ).map(auditFromRow);
+  }
+
+  // --- INVENTORIES (via RPC) ---
+  async getInventories(storeId) {
+    const client = requireClient();
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    let query = client
+      .from('inventories')
+      .select('*')
+      .order('created_at', {
+        ascending: false
+      });
+
+    if (targetStore !== 'ALL') {
+      query = query.eq(
+        'store_id',
+        targetStore
+      );
+    }
+
+    return unwrap(
+      await query,
+      []
+    ).map(inventoryFromRow);
+  }
+
+  async saveInventoryAudit({
+    storeId,
+    operatorId,
+    items,
+    notes,
+    reconcile
+  }) {
+    const client = requireClient();
+
+    const targetStore =
+      storeId ||
+      this.getCurrentStoreId();
+
+    const inv = unwrap(
+      await client.rpc(
+        'fn_reconcile_inventory',
+        {
+          p_store_id: targetStore,
+          p_items: items,
+          p_notes: notes || '',
+          p_reconcile: !!reconcile,
+          p_operator_id: null
+        }
+      ),
+      null
+    );
+
+    return inventoryFromRow(inv);
+  }
+}
+
+export const db = new GefDatabase();
