@@ -1,0 +1,339 @@
+-- ============================================================
+-- GEF | ADESÃO DE LOJA POR LINK DE EMBAIXADOR
+-- ============================================================
+
+-- ------------------------------------------------------------
+-- 1. Função pública para validar um código de embaixador
+-- ------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.fn_validate_ambassador_code(
+    p_referral_code TEXT
+)
+RETURNS TABLE (
+    ambassador_id TEXT,
+    ambassador_name TEXT,
+    referral_code TEXT,
+    commission_rate NUMERIC
+)
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT
+        a.id,
+        a.name,
+        a.referral_code,
+        a.commission_rate
+    FROM public.ambassadors a
+    WHERE UPPER(TRIM(a.referral_code)) = UPPER(TRIM(p_referral_code))
+      AND a.active = TRUE
+    LIMIT 1;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.fn_validate_ambassador_code(TEXT)
+TO anon, authenticated;
+
+
+-- ------------------------------------------------------------
+-- 2. Finalização da adesão
+--
+-- O utilizador já deve ter sido criado pelo Supabase Auth.
+-- auth.uid() será transformado em ADMIN da nova loja.
+-- ------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.fn_complete_ambassador_onboarding(
+    p_referral_code TEXT,
+    p_store_name TEXT,
+    p_owner_name TEXT,
+    p_phone TEXT,
+    p_city TEXT,
+    p_address TEXT DEFAULT NULL,
+    p_nuit_nif TEXT DEFAULT NULL,
+    p_monthly_fee NUMERIC DEFAULT 0
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_user_email TEXT;
+
+    v_ambassador public.ambassadors%ROWTYPE;
+
+    v_store_id TEXT;
+    v_store_code TEXT;
+
+    v_commission_rate NUMERIC(5,2);
+    v_commission NUMERIC(12,2);
+
+    v_existing_store TEXT;
+BEGIN
+    -- --------------------------------------------------------
+    -- Utilizador autenticado
+    -- --------------------------------------------------------
+
+    v_user_id := auth.uid();
+
+    IF v_user_id IS NULL THEN
+        RAISE EXCEPTION 'É necessário estar autenticado para concluir a adesão.';
+    END IF;
+
+
+    SELECT email
+    INTO v_user_email
+    FROM auth.users
+    WHERE id = v_user_id;
+
+
+    IF v_user_email IS NULL THEN
+        RAISE EXCEPTION 'Utilizador Auth não encontrado.';
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- Validar embaixador
+    -- --------------------------------------------------------
+
+    SELECT *
+    INTO v_ambassador
+    FROM public.ambassadors
+    WHERE UPPER(TRIM(referral_code)) =
+          UPPER(TRIM(p_referral_code))
+      AND active = TRUE
+    LIMIT 1;
+
+
+    IF v_ambassador.id IS NULL THEN
+        RAISE EXCEPTION 'Código de embaixador inválido ou inativo.';
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- Validar dados básicos
+    -- --------------------------------------------------------
+
+    IF NULLIF(TRIM(p_store_name), '') IS NULL THEN
+        RAISE EXCEPTION 'Nome da loja é obrigatório.';
+    END IF;
+
+    IF NULLIF(TRIM(p_owner_name), '') IS NULL THEN
+        RAISE EXCEPTION 'Nome do responsável é obrigatório.';
+    END IF;
+
+    IF NULLIF(TRIM(p_phone), '') IS NULL THEN
+        RAISE EXCEPTION 'Telefone é obrigatório.';
+    END IF;
+
+    IF NULLIF(TRIM(p_city), '') IS NULL THEN
+        RAISE EXCEPTION 'Cidade é obrigatória.';
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- O mesmo utilizador não pode ser reutilizado para outra
+    -- loja através desta adesão.
+    -- --------------------------------------------------------
+
+    SELECT store_id
+    INTO v_existing_store
+    FROM public.profiles
+    WHERE id = v_user_id
+    LIMIT 1;
+
+    IF v_existing_store IS NOT NULL THEN
+        RAISE EXCEPTION 'Este utilizador já está associado a uma loja.';
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- Gerar IDs
+    -- --------------------------------------------------------
+
+    v_store_id :=
+        'store-ref-' ||
+        replace(v_user_id::TEXT, '-', '');
+
+    v_store_code :=
+        'REF-' ||
+        upper(substr(md5(random()::TEXT || clock_timestamp()::TEXT), 1, 8));
+
+
+    -- --------------------------------------------------------
+    -- Comissão
+    -- --------------------------------------------------------
+
+    v_commission_rate :=
+        COALESCE(v_ambassador.commission_rate, 15);
+
+    v_commission :=
+        CASE
+            WHEN COALESCE(p_monthly_fee, 0) > 0
+            THEN ROUND(
+                COALESCE(p_monthly_fee, 0)
+                * v_commission_rate
+                / 100,
+                2
+            )
+            ELSE 0
+        END;
+
+
+    -- --------------------------------------------------------
+    -- Criar loja
+    -- --------------------------------------------------------
+
+    INSERT INTO public.stores (
+        id,
+        code,
+        name,
+        trade_name,
+        nuit_nif,
+        city,
+        address,
+        phone,
+        currency,
+        language,
+        is_headquarters,
+        valor_mensalidade,
+        data_inicio_teste,
+        data_fim_teste,
+        acesso_ativo
+    )
+    VALUES (
+        v_store_id,
+        v_store_code,
+        TRIM(p_store_name),
+        TRIM(p_store_name),
+        NULLIF(TRIM(p_nuit_nif), ''),
+        TRIM(p_city),
+        NULLIF(TRIM(p_address), ''),
+        TRIM(p_phone),
+        'MZN',
+        'pt-MZ',
+        FALSE,
+        COALESCE(p_monthly_fee, 0),
+        CURRENT_DATE,
+        CURRENT_DATE + 30,
+        TRUE
+    );
+
+
+    -- --------------------------------------------------------
+    -- Transformar utilizador atual em ADMIN
+    -- --------------------------------------------------------
+
+    UPDATE public.profiles
+    SET
+        email = v_user_email,
+        full_name = TRIM(p_owner_name),
+        role = 'ADMIN',
+        store_id = v_store_id,
+        active = TRUE,
+        updated_at = NOW()
+    WHERE id = v_user_id;
+
+
+    IF NOT FOUND THEN
+        INSERT INTO public.profiles (
+            id,
+            email,
+            full_name,
+            role,
+            store_id,
+            active
+        )
+        VALUES (
+            v_user_id,
+            v_user_email,
+            TRIM(p_owner_name),
+            'ADMIN',
+            v_store_id,
+            TRUE
+        );
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- Registrar indicação do embaixador
+    -- --------------------------------------------------------
+
+    INSERT INTO public.ambassador_referred_stores (
+        id,
+        ambassador_id,
+        name,
+        owner_name,
+        phone,
+        city,
+        monthly_fee,
+        payment_status,
+        commission_rate,
+        contract_duration_months,
+        total_commission_earned
+    )
+    VALUES (
+        'store-ref-' ||
+        replace(v_user_id::TEXT, '-', ''),
+        v_ambassador.id,
+        TRIM(p_store_name),
+        TRIM(p_owner_name),
+        TRIM(p_phone),
+        TRIM(p_city),
+        COALESCE(p_monthly_fee, 0),
+        'PAGO',
+        v_commission_rate,
+        12,
+        v_commission
+    );
+
+
+    -- --------------------------------------------------------
+    -- Atualizar comissão pendente do embaixador
+    -- --------------------------------------------------------
+
+    IF v_commission > 0 THEN
+
+        UPDATE public.ambassadors
+        SET pending_commissions =
+            COALESCE(pending_commissions, 0)
+            + v_commission
+        WHERE id = v_ambassador.id;
+
+    END IF;
+
+
+    -- --------------------------------------------------------
+    -- Resultado
+    -- --------------------------------------------------------
+
+    RETURN jsonb_build_object(
+        'success', TRUE,
+        'store_id', v_store_id,
+        'store_code', v_store_code,
+        'ambassador_id', v_ambassador.id,
+        'ambassador_name', v_ambassador.name,
+        'commission_rate', v_commission_rate,
+        'commission', v_commission,
+        'admin_user_id', v_user_id,
+        'admin_email', v_user_email
+    );
+
+EXCEPTION
+    WHEN unique_violation THEN
+        RAISE EXCEPTION 'Não foi possível concluir a adesão porque alguns dados já existem.';
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.fn_complete_ambassador_onboarding(
+    TEXT,
+    TEXT,
+    TEXT,
+    TEXT,
+    TEXT,
+    TEXT,
+    TEXT,
+    NUMERIC
+)
+TO authenticated;
